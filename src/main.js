@@ -1,8 +1,9 @@
 import './styles.css';
-import { observeSession, loginAccount, logoutAccount, registerAccount, resetPassword, ensureAnonymousSession } from './firebase/auth.js';
+import QRCode from 'qrcode';
+import { observeSession, loginAccount, logoutAccount, registerAccount, resetPassword, ensureAnonymousSession, clearAnonymousSession } from './firebase/auth.js';
 import { firebaseConfigured } from './firebase/config.js';
 import { findOwnedDestination, listDestinationMessages } from './firebase/firestore.js';
-import { createDestination, createReport, deleteMessage, getPublicDestination, markMessageRead, moderateMessage, startMessageUpload, submitAnonymousMessage } from './firebase/api.js';
+import { createDestination, createReport, deleteMessage, ensureDestinationLink, getPublicDestination, markMessageRead, moderateMessage, startMessageUpload, submitAnonymousMessage } from './firebase/api.js';
 import { getPrivateMediaUrl, uploadReservedMedia, validateMedia } from './firebase/storage.js';
 
 const root = document.querySelector('#app');
@@ -34,6 +35,8 @@ function frame(content, active = 'inbox') {
 }
 
 function renderPublic(destination) {
+  let selectedFiles = [];
+  let previewUrls = [];
   root.innerHTML = `<main class="public-page"><a class="brand public-brand" href="/"><span class="brand-mark">q</span><span>quietdrop</span></a>
     <section class="message-panel"><div class="eyebrow"><span class="eyebrow-dot"></span> A PRIVATE NOTE</div>
       <h1>Send an anonymous<br />message to <em>${escapeHtml(destination.name)}</em></h1>
@@ -52,9 +55,28 @@ function renderPublic(destination) {
   const text = document.querySelector('#message-text');
   text.addEventListener('input', () => { document.querySelector('#char-count').textContent = text.value.length; });
   const files = document.querySelector('#media-input');
+  function renderSelectedFiles() {
+    previewUrls.forEach((url) => URL.revokeObjectURL(url));
+    previewUrls = [];
+    const fileList = document.querySelector('#file-list');
+    fileList.innerHTML = selectedFiles.map((file, index) => {
+      const previewUrl = URL.createObjectURL(file);
+      previewUrls.push(previewUrl);
+      const preview = file.type.startsWith('video/')
+        ? `<video src="${previewUrl}" muted preload="metadata"></video>`
+        : `<img src="${previewUrl}" alt="Preview of ${escapeHtml(file.name)}" />`;
+      return `<article class="selected-file"><div class="selected-preview">${preview}</div><span>${escapeHtml(file.name)} · ${formatBytes(file.size)}</span><button type="button" data-remove-file="${index}" aria-label="Remove ${escapeHtml(file.name)}">Remove</button></article>`;
+    }).join('');
+    fileList.querySelectorAll('[data-remove-file]').forEach((button) => button.addEventListener('click', () => {
+      selectedFiles.splice(Number(button.dataset.removeFile), 1);
+      renderSelectedFiles();
+    }));
+  }
   files.addEventListener('change', () => {
-    const selected = [...files.files];
-    document.querySelector('#file-list').textContent = selected.map((file) => `${file.name} · ${formatBytes(file.size)}`).join('  /  ');
+    selectedFiles = [...files.files];
+    renderSelectedFiles();
+    try { selectedFiles.forEach(validateMedia); setNotice(); }
+    catch (error) { setNotice(error.message, 'error'); }
   });
   document.querySelector('#message-form').addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -64,12 +86,16 @@ function renderPublic(destination) {
     submit.disabled = true;
     setNotice('Sending securely…');
     try {
+      if (!text.value.trim()) throw new Error('Write a message before sending.');
+      if (selectedFiles.length > 3) throw new Error('Choose up to 3 attachments.');
+      const details = selectedFiles.map((file) => ({ file, validated: validateMedia(file) }));
       await ensureAnonymousSession();
-      const selected = [...files.files];
-      if (selected.length > 3) throw new Error('Choose up to 3 attachments.');
-      const details = selected.map((file) => ({ file, validated: validateMedia(file) }));
       const reservation = await startMessageUpload({
-        destinationSlug: destination.slug,
+        destination: {
+          type: destination.type,
+          slug: destination.slug,
+          organizationSlug: destination.organizationSlug,
+        },
         files: details.map(({ file, validated }) => ({ name: file.name, ...validated })),
       });
       const attachments = await Promise.all(details.map(async ({ file, validated }, index) => {
@@ -84,8 +110,12 @@ function renderPublic(destination) {
         text: text.value,
         attachments,
       });
-      root.innerHTML = `<main class="success-page"><a class="brand public-brand" href="/"><span class="brand-mark">q</span><span>quietdrop</span></a><div class="success-mark">✓</div><p class="eyebrow">NOTE RECEIVED</p><h1>A note, now<br /><em>on its way.</em></h1><p class="subcopy">${result.status === 'needs_review' ? 'It will be checked before it reaches the inbox.' : 'It will appear in the inbox after a quick review.'}</p><a class="text-link" href="/u/${encodeURIComponent(destination.slug)}">Send another note <span>↗</span></a></main>`;
+      await clearAnonymousSession();
+      previewUrls.forEach((url) => URL.revokeObjectURL(url));
+      previewUrls = [];
+      root.innerHTML = `<main class="success-page"><a class="brand public-brand" href="/"><span class="brand-mark">q</span><span>quietdrop</span></a><div class="success-mark">✓</div><p class="eyebrow">NOTE RECEIVED</p><h1>A note, now<br /><em>on its way.</em></h1><p class="subcopy">${result.status === 'needs_review' ? 'It will be checked before it reaches the inbox.' : 'It will appear in the inbox after a quick review.'}</p><a class="text-link" href="${escapeHtml(destination.path)}">Send another note <span>↗</span></a></main>`;
     } catch (error) {
+      await clearAnonymousSession();
       setNotice(readableError(error), 'error');
       submit.disabled = false;
     } finally {
@@ -134,12 +164,20 @@ function renderGate(mode = 'login') {
 function renderDashboard() {
   root.innerHTML = frame(`<section class="dash-content"><div class="dash-heading"><div><div class="eyebrow">MONDAY, SEPTEMBER 26</div><h1>Your inbox, <em>in focus.</em></h1><p class="subcopy">A quiet place for the things left unsaid.</p></div><button class="outline-button" data-action="refresh">↻ <span>Refresh</span></button></div>
     <div class="stats-row"><article class="stat"><span class="stat-label">ALL NOTES</span><strong id="stat-total">—</strong><span class="stat-foot">in your inbox</span></article><article class="stat"><span class="stat-label">PENDING</span><strong id="stat-pending">—</strong><span class="stat-foot">awaiting a look</span></article><article class="stat"><span class="stat-label">APPROVED</span><strong id="stat-approved">—</strong><span class="stat-foot">ready to read</span></article><article class="stat"><span class="stat-label">REPORTED</span><strong id="stat-reported">—</strong><span class="stat-foot">flagged for review</span></article></div>
-    <section class="link-strip"><div><span class="eyebrow">YOUR ANONYMOUS LINK</span><div class="share-url" id="share-url">Create a destination to get your link</div></div><div class="link-actions"><button class="outline-button" data-action="copy">Copy link</button><button class="send-button compact" data-action="new-destination">＋ <span>New link</span></button></div></section>
+    <section class="link-strip"><div class="link-details"><span class="eyebrow">ANONYMOUS MESSAGE LINK</span><a class="share-url" id="share-url" href="#">Create your destination to get its link</a></div><div class="link-actions"><button class="outline-button" data-action="copy" disabled>Copy link</button><button class="outline-button" data-action="open-link" disabled>Open link</button><button class="outline-button" data-action="share" disabled>Share</button><button class="outline-button" data-action="qr" disabled>QR Code</button><button class="send-button compact" data-action="new-destination">＋ <span>New destination</span></button></div></section>
+    <dialog class="destination-dialog" id="destination-dialog"><form id="destination-form"><h2>Create destination</h2><label>Destination type<select name="type"><option value="individual">Individual</option><option value="organization">Organization</option><option value="department">Department</option><option value="group">Group</option></select></label><label>Name<input name="name" maxlength="80" required /></label><label data-organization-field hidden>Organization link name<input name="organizationSlug" maxlength="40" autocomplete="off" /></label><p class="dialog-help">The public link is generated automatically from this information.</p><div class="notice" data-dialog-notice aria-live="polite"></div><div class="dialog-actions"><button class="outline-button" type="button" data-action="close-destination">Cancel</button><button class="send-button compact" type="submit">Create link</button></div></form></dialog>
+    <dialog class="qr-dialog" id="qr-dialog"><form method="dialog"><h2>Anonymous message QR</h2><img id="qr-image" alt="QR code for this anonymous message link" /><div class="dialog-actions"><a class="outline-button" id="qr-download" download="anonymous-message-qr.png">Download QR</a><button class="send-button compact" type="submit">Done</button></div></form></dialog>
     <section class="inbox-section"><div class="section-heading"><div><span class="eyebrow">INCOMING</span><h2>Recent notes <span id="message-count" class="count-pill">0</span></h2></div><label class="filter-select">All notes <span>⌄</span><select id="status-filter" aria-label="Filter messages"><option value="all">All notes</option><option value="unread">Unread</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="needs_review">Needs review</option><option value="reported">Reported</option><option value="archived">Archived</option></select></label></div><div class="message-list" id="message-list"><div class="empty-state">Create a private link to start receiving notes.</div></div></section>
     <div class="notice dash-notice" data-notice aria-live="polite"></div></section>`);
   document.querySelector('[data-action="refresh"]').addEventListener('click', loadInbox);
   document.querySelector('[data-action="new-destination"]').addEventListener('click', createLink);
   document.querySelector('[data-action="copy"]').addEventListener('click', copyLink);
+  document.querySelector('[data-action="open-link"]').addEventListener('click', openLink);
+  document.querySelector('[data-action="share"]').addEventListener('click', shareLink);
+  document.querySelector('[data-action="qr"]').addEventListener('click', showQrCode);
+  document.querySelector('[data-action="close-destination"]').addEventListener('click', () => document.querySelector('#destination-dialog').close());
+  document.querySelector('#destination-form [name="type"]').addEventListener('change', updateDestinationForm);
+  document.querySelector('#destination-form').addEventListener('submit', submitDestinationForm);
   document.querySelector('#status-filter').addEventListener('change', filterMessages);
   loadInbox();
 }
@@ -147,17 +185,29 @@ function renderDashboard() {
 let inboxMessages = [];
 let activeDestination = null;
 
-async function loadInbox() {
+async function loadInbox(preferredDestination = null) {
   try {
-    activeDestination = await findOwnedDestination(currentUser.uid);
+    activeDestination = preferredDestination || await findOwnedDestination(currentUser.uid);
+    if (activeDestination && !activeDestination.slug) {
+      activeDestination = await ensureDestinationLink({ destinationId: activeDestination.id });
+    }
     const url = document.querySelector('#share-url');
     if (activeDestination) {
-      url.textContent = `${location.origin}/u/${activeDestination.slug}`;
+      const path = activeDestination.path || activeDestination.publicPath || publicPath(activeDestination);
+      url.href = path;
+      url.textContent = `${window.location.origin}${path}`;
+      ['copy', 'open-link', 'share', 'qr'].forEach((action) => {
+        document.querySelector(`[data-action="${action}"]`).disabled = false;
+      });
       inboxMessages = await listDestinationMessages(activeDestination.id);
       updateStats(inboxMessages);
       filterMessages();
     } else {
-      url.textContent = 'Create a destination to get your link';
+      url.removeAttribute('href');
+      url.textContent = 'Create your destination to get its link';
+      ['copy', 'open-link', 'share', 'qr'].forEach((action) => {
+        document.querySelector(`[data-action="${action}"]`).disabled = true;
+      });
       inboxMessages = [];
       updateStats([]);
       document.querySelector('#message-list').innerHTML = '<div class="empty-state">Create your first anonymous link above.</div>';
@@ -231,20 +281,85 @@ function filterMessages() {
   }));
 }
 
-async function createLink() {
-  const slug = prompt('Choose a short link name (letters, numbers, and hyphens):');
-  if (!slug) return;
+function publicPath(destination) {
+  if (destination.type === 'organization') return `/c/${encodeURIComponent(destination.slug)}`;
+  if (destination.type === 'department' || destination.type === 'group') {
+    return `/c/${encodeURIComponent(destination.organizationSlug)}/${encodeURIComponent(destination.slug)}`;
+  }
+  return `/u/${encodeURIComponent(destination.slug)}`;
+}
+
+function getDestinationUrl() {
+  if (!activeDestination) throw new Error('Create a destination first.');
+  return `${window.location.origin}${activeDestination.path || activeDestination.publicPath || publicPath(activeDestination)}`;
+}
+
+function updateDestinationForm() {
+  const type = document.querySelector('#destination-form [name="type"]').value;
+  const parentField = document.querySelector('[data-organization-field]');
+  const needsParent = type === 'department' || type === 'group';
+  parentField.hidden = !needsParent;
+  parentField.querySelector('input').required = needsParent;
+}
+
+async function submitDestinationForm(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const fields = Object.fromEntries(new FormData(form));
   try {
-    const result = await createDestination({ name: currentUser.displayName || 'My inbox', slug });
-    activeDestination = result;
-    await loadInbox();
-  } catch (error) { setNotice(readableError(error), 'error'); }
+    const result = await createDestination({
+      name: fields.name,
+      type: fields.type,
+      ...(fields.organizationSlug ? { organizationSlug: fields.organizationSlug } : {}),
+    });
+    document.querySelector('#destination-dialog').close();
+    await loadInbox(result);
+    setNotice(`Link created: ${getDestinationUrl()}`);
+  } catch (error) {
+    const notice = document.querySelector('[data-dialog-notice]');
+    notice.textContent = readableError(error);
+    notice.dataset.kind = 'error';
+  }
+}
+
+function createLink() {
+  const form = document.querySelector('#destination-form');
+  form.reset();
+  form.elements.name.value = currentUser.displayName || '';
+  updateDestinationForm();
+  document.querySelector('[data-dialog-notice]').textContent = '';
+  document.querySelector('#destination-dialog').showModal();
 }
 
 async function copyLink() {
   if (!activeDestination) return setNotice('Create a destination first.', 'error');
-  await navigator.clipboard.writeText(`${location.origin}/u/${activeDestination.slug}`);
-  setNotice('Link copied.');
+  try {
+    await navigator.clipboard.writeText(getDestinationUrl());
+    setNotice('Link copied.');
+  } catch (error) { setNotice(readableError(error), 'error'); }
+}
+
+function openLink() {
+  if (!activeDestination) return setNotice('Create a destination first.', 'error');
+  window.open(getDestinationUrl(), '_blank', 'noopener,noreferrer');
+}
+
+async function shareLink() {
+  if (!activeDestination) return setNotice('Create a destination first.', 'error');
+  const url = getDestinationUrl();
+  if (!navigator.share) return copyLink();
+  try { await navigator.share({ title: 'Anonymous message link', url }); }
+  catch (error) { if (error.name !== 'AbortError') setNotice(readableError(error), 'error'); }
+}
+
+async function showQrCode() {
+  if (!activeDestination) return setNotice('Create a destination first.', 'error');
+  try {
+    const dataUrl = await QRCode.toDataURL(getDestinationUrl(), { width: 280, margin: 2 });
+    document.querySelector('#qr-image').src = dataUrl;
+    document.querySelector('#qr-download').href = dataUrl;
+    document.querySelector('#qr-dialog').showModal();
+  } catch (error) { setNotice(readableError(error), 'error'); }
 }
 
 function renderHome() {
@@ -268,9 +383,17 @@ async function route() {
     root.innerHTML = `<main class="config-page"><div class="brand"><span class="brand-mark">q</span><span>quietdrop</span></div><div class="eyebrow">SETUP REQUIRED</div><h1>Connect your<br /><em>Firebase project.</em></h1><p class="subcopy">Copy .env.example to .env and add your Firebase web app settings. See the README for setup steps.</p></main>`;
     return;
   }
-  if (path[0] === 'u' && path[1]) {
+  const publicRoute = path[0] === 'u' && path[1]
+    ? { type: 'individual', slug: path[1] }
+    : path[0] === 'c' && path[1] && path.length === 2
+      ? { type: 'organization', slug: path[1] }
+      : path[0] === 'c' && path[1] && path[2]
+        ? { type: 'child', organizationSlug: path[1], slug: path[2] }
+        : null;
+  if (publicRoute) {
+    root.innerHTML = '<main class="config-page"><div class="eyebrow">OPENING PRIVATE INBOX</div><p class="subcopy">Loading this anonymous destination…</p></main>';
     try {
-      const destination = await getPublicDestination({ type: 'user', slug: path[1] });
+      const destination = await getPublicDestination(publicRoute);
       destination ? renderPublic(destination) : (root.innerHTML = '<main class="config-page"><div class="eyebrow">LINK NOT FOUND</div><h1>This inbox<br /><em>isn’t here.</em></h1><a class="text-link" href="/">Go home ↗</a></main>');
     } catch (error) {
       root.innerHTML = error?.code?.includes('not-found')
@@ -279,7 +402,11 @@ async function route() {
     }
     return;
   }
-  if (!currentUser) return params.has('register') ? renderGate('register') : params.has('login') ? renderGate('login') : renderHome();
+  if (path[0] === 'register' || params.has('register')) return currentUser ? renderDashboard() : renderGate('register');
+  if (path[0] === 'login' || params.has('login') || path[0] === 'dashboard') {
+    if (!currentUser) return renderGate('login');
+  }
+  if (!currentUser) return renderHome();
   renderDashboard();
 }
 
@@ -289,6 +416,7 @@ root.addEventListener('click', async (event) => {
 
 if (firebaseConfigured) observeSession((user) => {
   currentUser = user && !user.isAnonymous ? user : null;
-  route();
+  const isPublicDestination = location.pathname.startsWith('/u/') || location.pathname.startsWith('/c/');
+  if (!isPublicDestination || !busy) route();
 });
 else route();

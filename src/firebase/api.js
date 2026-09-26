@@ -8,6 +8,7 @@ async function call(name, data) {
 
 export const getPublicDestination = (data) => call('getPublicDestination', data);
 export const createDestination = (data) => call('createDestination', data);
+export const ensureDestinationLink = (data) => call('ensureDestinationLink', data);
 export const startMessageUpload = (data) => call('startMessageUpload', data);
 export const submitAnonymousMessage = (data) => call('submitAnonymousMessage', data);
 export const moderateMessage = (data) => call('moderateMessage', data);

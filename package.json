@@ -11,7 +11,8 @@
     "test:rules": "firebase emulators:exec --only firestore,storage --project confession-cetp \"node --test tests/*.test.cjs\""
   },
   "dependencies": {
-    "firebase": "^11.10.0"
+    "firebase": "^11.10.0",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^4.0.1",

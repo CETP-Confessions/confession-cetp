@@ -22,6 +22,7 @@ const allowedTypes = new Map([
 export function validateMedia(file) {
   const type = allowedTypes.get(file.type);
   if (!type) throw new Error('Choose a JPG, PNG, WebP, GIF, MP4, or WebM file.');
+  if (file.size < 1) throw new Error('Choose a file that is not empty.');
   if (file.size > MEDIA_LIMITS[type]) {
     throw new Error(`${type === 'video' ? 'Video' : 'Image'} exceeds the allowed size.`);
   }

@@ -18,20 +18,16 @@ export function observeSession(callback) {
 export async function registerAccount({ displayName, email, password }) {
   const credential = await createUserWithEmailAndPassword(auth, email.trim(), password);
   const cleanName = displayName.trim();
-  const usernameBase = cleanName.toLowerCase().normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '').slice(0, 30) || 'inbox';
-  const username = `${usernameBase}-${credential.user.uid.slice(0, 6).toLowerCase()}`;
   await updateProfile(credential.user, { displayName: cleanName });
   await setDoc(doc(db, 'users', credential.user.uid), {
-    username,
+    username: '',
     displayName: cleanName,
     email: credential.user.email,
     role: 'user',
     active: true,
     createdAt: serverTimestamp(),
   });
-  await createDestination({ name: cleanName, slug: username });
+  await createDestination({ name: cleanName, type: 'individual' });
   return credential.user;
 }
 
@@ -52,4 +48,8 @@ export async function ensureAnonymousSession() {
   if (auth.currentUser?.isAnonymous) return auth.currentUser;
   if (auth.currentUser) throw new Error('Open this link in a signed-out browser to send a note.');
   return (await signInAnonymously(auth)).user;
+}
+
+export async function clearAnonymousSession() {
+  if (auth.currentUser?.isAnonymous) await signOut(auth).catch(() => {});
 }

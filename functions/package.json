@@ -6,7 +6,8 @@
     "node": "22"
   },
   "scripts": {
-    "lint": "node --check src/index.js && node --check src/messages.js && node --check src/destinations.js"
+    "lint": "node --check src/index.js && node --check src/destinations.js && node --check src/destinationLinks.js && node --check src/messages.js && node --check src/moderation.js && node --check src/reports.js && node --check src/notifications.js && node --check src/shared.js",
+    "test": "node --test tests/*.test.cjs"
   },
   "dependencies": {
     "firebase-admin": "^13.4.0",

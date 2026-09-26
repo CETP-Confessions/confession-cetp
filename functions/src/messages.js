@@ -6,6 +6,7 @@ const {
   callableOptions, hash, hashClientIp,
 } = require('./shared');
 const { moderateText } = require('./moderation');
+const { resolvePublicDestination } = require('./destinations');
 
 const WINDOW_MS = 60 * 1000;
 const MAX_PER_IP = Number.parseInt(process.env.MAX_MESSAGES_PER_IP_PER_MINUTE || '8', 10);
@@ -48,11 +49,13 @@ async function checkRateLimit(ipHash, destinationId) {
 
 const startMessageUpload = onCall(callableOptions(20), async (request) => {
   const auth = requireAnonymous(request);
-  const slug = String(request.data?.destinationSlug || '').trim().toLowerCase();
+  const route = request.data?.destination || {};
+  const slug = String(route.slug || request.data?.destinationSlug || '').trim().toLowerCase();
+  const type = String(route.type || 'individual');
+  const organizationSlug = String(route.organizationSlug || '').trim().toLowerCase();
   const inputFiles = Array.isArray(request.data?.files) ? request.data.files : [];
   if (inputFiles.length > MAX_ATTACHMENTS) throw new HttpsError('invalid-argument', 'Too many attachments.');
-  const matches = await db.collection('destinations').where('slug', '==', slug).where('active', '==', true).limit(1).get();
-  const destinationDoc = matches.docs[0];
+  const destinationDoc = await resolvePublicDestination(type, slug, organizationSlug);
   if (!destinationDoc || !destinationDoc.data().allowMessages) throw new HttpsError('not-found', 'This inbox is unavailable.');
   const destination = destinationDoc.data();
   if (inputFiles.length && !destination.allowMedia) throw new HttpsError('failed-precondition', 'Media is not enabled for this inbox.');
