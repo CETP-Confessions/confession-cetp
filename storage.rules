@@ -1,0 +1,37 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function reservation(requestId) {
+      return firestore.get(/databases/(default)/documents/uploadRequests/$(requestId)).data;
+    }
+    function isAllowedType(contentType) {
+      return contentType in ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4', 'video/webm'];
+    }
+    function allowedSize(contentType, size) {
+      return contentType in ['video/mp4', 'video/webm']
+        ? size <= 50 * 1024 * 1024
+        : size <= 10 * 1024 * 1024;
+    }
+
+    match /messages/{messageId}/{fileName} {
+      allow create: if request.auth != null
+        && request.auth.token.firebase.sign_in_provider == 'anonymous'
+        && reservation(messageId).messageId == messageId
+        && reservation(messageId).uploaderUid == request.auth.uid
+        && reservation(messageId).state == 'uploading'
+        && reservation(messageId).expiresAt > request.time
+        && fileName in reservation(messageId).uploadNames
+        && request.resource.contentType == reservation(messageId).uploadTypes[fileName]
+        && isAllowedType(request.resource.contentType)
+        && request.resource.size == reservation(messageId).uploadSizes[fileName]
+        && allowedSize(request.resource.contentType, request.resource.size);
+
+      allow get: if request.auth != null
+        && reservation(messageId).state == 'complete'
+        && reservation(messageId).ownerId == request.auth.uid;
+      allow list, update, delete: if false;
+    }
+
+    match /{allPaths=**} { allow read, write: if false; }
+  }
+}
