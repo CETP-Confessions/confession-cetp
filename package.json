@@ -4,18 +4,15 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --host 0.0.0.0",
     "build": "vite build",
-    "preview": "vite preview",
-    "emulators": "firebase emulators:start --project confession-cetp",
-    "test:rules": "firebase emulators:exec --only firestore,storage --project confession-cetp \"node --test tests/*.test.cjs\""
+    "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
-    "firebase": "^11.10.0",
+    "@supabase/supabase-js": "^2.56.0",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
-    "@firebase/rules-unit-testing": "^4.0.1",
     "vite": "^6.3.5"
   }
 }

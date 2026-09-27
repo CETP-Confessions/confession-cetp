@@ -7,5 +7,7 @@ dist/
 firebase-debug.log
 firestore-debug.log
 ui-debug.log
-functions/node_modules/
-functions/.env.*
+backend/node_modules/
+backend/.env
+backend/.env.*
+!backend/.env.example
