@@ -466,12 +466,12 @@ async function handleRegister(data) {
     throw signUpError;
   }
 
-  const user = signUpData.user;
+  const user = signUpData?.user;
   if (!user?.id) {
     throw new Error('Your account could not be created.');
   }
 
-  const { error: signInError } = await supabase.auth.signInWithPassword({
+  const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
     email,
     password,
   });
@@ -480,8 +480,9 @@ async function handleRegister(data) {
     throw new Error('Account created. Please confirm your email before signing in.');
   }
 
+  const signedInUser = signInData?.user ?? user;
   const { error: profileError } = await supabase.from('profiles').insert({
-    id: user.id,
+    id: signedInUser.id,
     username,
     created_at: new Date().toISOString(),
   });
@@ -489,6 +490,9 @@ async function handleRegister(data) {
   if (profileError) {
     if (profileError.code === '23505') {
       throw new Error('That username is already taken. Try another.');
+    }
+    if (profileError.code === '42501') {
+      throw new Error('Profile insert is blocked by Supabase RLS. Make sure the table policy allows the signed-in user to insert their own row.');
     }
     throw profileError;
   }

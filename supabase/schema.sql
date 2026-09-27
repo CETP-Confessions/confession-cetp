@@ -103,3 +103,7 @@ end;
 $$;
 
 grant execute on function public.insert_anonymous_message(text, text, text, text) to anon;
+
+-- NOTE: keep the profile table limited to the auth user ID and username only.
+-- Do not add an email column here; email belongs to auth.users.
+
