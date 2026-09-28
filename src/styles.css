@@ -249,3 +249,110 @@ time { color: var(--muted); font-size: 0.85rem; font-weight: 500; }
 
 /* ── Wider message panel for description ────────────── */
 .public-shell .message-panel { width: min(100%, 560px); }
+
+/* Responsive layout corrections */
+html { overflow-x: hidden; }
+body { overflow-x: hidden; }
+img, video, input, textarea, button, select { max-width: 100%; }
+.page-shell { width: 100%; }
+.hero-copy, .dashboard-content, .public-content, .message-panel { min-width: 0; }
+.share-panel > div, .dashboard-header > div { min-width: 0; }
+.share-link { overflow-wrap: anywhere; }
+.message-card p, .public-message-text, .public-comment p, .comment-row p { overflow-wrap: anywhere; }
+.dashboard-tabs, .comment-filters { min-width: 0; }
+.media-preview img, .media-preview video { width: min(100%, 280px); }
+
+@media (max-width: 840px) {
+  .top-nav, .public-nav {
+    position: relative;
+    inset: auto;
+    width: 100%;
+    padding: 16px 20px;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+  }
+  .public-nav { flex-wrap: wrap; }
+  .public-brand { position: static; }
+  .nav-actions { flex: 1; justify-content: flex-end; gap: 8px; }
+  .nav-link { padding: 8px; white-space: nowrap; }
+  .hero-row { width: min(100%, 680px); padding: 32px 0 0; }
+  .home-shell { align-content: start; place-items: start center; padding: 0 20px 32px; }
+  .hero-card { width: min(100%, 380px); height: 310px; }
+  .note-back { inset: 12px 8px 12px 18px; }
+  .note-front { inset: 28px 18px 0 0; }
+  .dashboard-shell { width: 100%; }
+  .sidebar { min-width: 0; }
+  .dashboard-content { padding: 24px; }
+  .moderation-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .public-page { padding: 0 20px 48px; }
+  .public-content { padding-top: 36px; }
+  .public-heading { margin-bottom: 28px; }
+  .public-message-card { padding: 24px; }
+  .public-card-actions { flex-direction: row; align-items: center; }
+}
+
+@media (max-width: 600px) {
+  .page-shell { padding: 20px 16px; }
+  .top-nav, .public-nav { padding: 14px 16px; }
+  .top-nav, .public-nav { flex-direction: column; align-items: stretch; }
+  .brand { gap: 9px; }
+  .brand-logo { width: 30px; height: 30px; }
+  .nav-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; width: 100%; }
+  .nav-actions .primary-button { grid-column: 1 / -1; }
+  .nav-link, .nav-actions .primary-button { min-height: 42px; }
+  .nav-link { justify-content: center; }
+  .hero-row { gap: 20px; padding-top: 28px; }
+  .hero-copy h1 { margin-bottom: 16px; font-size: 2.25rem; line-height: 1.12; }
+  .subcopy { font-size: 1rem; line-height: 1.65; }
+  .hero-actions { display: grid; grid-template-columns: 1fr; gap: 10px; margin-top: 24px; }
+  .hero-actions > * { width: 100%; }
+  .features-grid { margin-top: 28px; padding-top: 22px; }
+  .hero-card { height: 270px; }
+  .note-card { padding: 22px; border-radius: 18px; }
+  .note-front p { font-size: 1.15rem; line-height: 1.45; }
+  .auth-panel, .config-card, .message-panel { padding: 24px 20px; border-radius: 18px; }
+  .auth-panel h1, .config-card h1, .message-panel h1 { font-size: 2rem; line-height: 1.15; }
+  .stack-form { gap: 16px; }
+  .stack-form input, .stack-form textarea { padding: 13px 14px; }
+  .stack-form textarea { min-height: 140px; }
+  .public-shell { align-content: start; padding-top: 16px; }
+  .public-brand { align-self: flex-start; }
+  .page-description { padding: 18px; margin-top: 20px; }
+  .detail-item { gap: 9px; }
+  .dashboard-content { padding: 20px 16px 32px; }
+  .dashboard-header { align-items: flex-start; flex-direction: column; gap: 14px; margin-bottom: 20px; }
+  .dashboard-header h1 { font-size: 1.8rem; line-height: 1.2; overflow-wrap: anywhere; }
+  .dashboard-header .secondary-button { width: 100%; }
+  .stats-grid, .moderation-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .stat-card { padding: 16px 14px; border-radius: 14px; }
+  .stat-card span { font-size: 0.7rem; line-height: 1.35; }
+  .stat-card strong { font-size: 1.8rem; }
+  .share-panel { padding: 16px; }
+  .share-panel .action-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .share-panel .action-row button:last-child { grid-column: 1 / -1; }
+  .share-panel .secondary-button { padding: 10px 12px; }
+  .dashboard-tabs, .comment-filters { flex-wrap: nowrap; overflow-x: auto; margin: 24px -16px 14px; padding: 0 16px 12px; scrollbar-width: thin; }
+  .dashboard-tab, .comment-filters button, .add-tab-select { flex: 0 0 auto; }
+  .inbox-header { padding-top: 22px; margin-top: 16px; }
+  .message-card, .public-message-card { padding: 18px; border-radius: 16px; }
+  .message-card p, .public-message-text { font-size: 1rem; line-height: 1.6; }
+  .message-topline { align-items: flex-start; }
+  .message-actions { gap: 14px; }
+  .public-page { padding: 0 16px 32px; }
+  .public-content { padding-top: 28px; }
+  .public-heading { text-align: left; padding-bottom: 22px; margin-bottom: 22px; }
+  .public-heading h1 { font-size: 2rem; line-height: 1.15; }
+  .public-card-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .comment-row { flex-direction: column; padding: 14px; }
+  .comment-form .primary-button { width: 100%; }
+  .public-empty { padding: 32px 18px; }
+}
+
+@media (max-width: 360px) {
+  .nav-actions { grid-template-columns: 1fr; }
+  .nav-actions .primary-button { grid-column: auto; }
+  .stats-grid, .moderation-stats { grid-template-columns: 1fr; }
+  .public-card-actions { grid-template-columns: 1fr; }
+  .auth-panel, .config-card, .message-panel { padding: 20px 16px; }
+}
