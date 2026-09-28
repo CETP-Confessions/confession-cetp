@@ -2,7 +2,7 @@ import './styles.css';
 import QRCode from 'qrcode';
 import { supabase, supabaseConfig } from './supabase.js';
 
-const INBOX_USERNAME = import.meta.env.VITE_INBOX_USERNAME || 'quietdrop';
+const INBOX_USERNAME = encodeURIComponent(import.meta.env.VITE_INBOX_USERNAME || 'quietdrop');
 
 const root = document.querySelector('#app');
 const state = {
@@ -309,6 +309,7 @@ async function renderDashboard(noticeMessage = '') {
                     <button data-action="toggle-pin" data-id="${message.id}">${message.is_pinned ? 'Unpin' : 'Pin'}</button>
                     <button data-action="toggle-read" data-id="${message.id}">${message.is_read ? 'Mark unread' : 'Mark read'}</button>
                     <button data-action="download-image" data-id="${message.id}">Download Image</button>
+                    ${message.media_path ? `<button data-action="download-media" data-id="${message.id}">Download Attachment</button>` : ''}
                     <button class="danger-action" data-action="delete-message" data-id="${message.id}">Delete</button>
                   </div>
                   <details class="message-comments">
@@ -487,8 +488,18 @@ async function renderPublicMessage(username) {
           <h1>Send me an anonymous message</h1>
           <p class="subcopy">Your identity isn't shown to the recipient.</p>
 
+          <div class="page-description">
+            <h3>📝 What is this?</h3>
+            <p>CETP Confessions is a safe, anonymous space for our campus community. Share a hidden crush, a funny classroom moment, a heartfelt thank-you, or anything on your mind — without revealing who you are.</p>
+            <div class="description-details">
+              <div class="detail-item"><span>🔒</span><p><strong>Completely anonymous</strong> — your identity is never logged or shared with anyone.</p></div>
+              <div class="detail-item"><span>🛡️</span><p><strong>Moderated for safety</strong> — every message is reviewed by admins before it goes public.</p></div>
+              <div class="detail-item"><span>📎</span><p><strong>Attach images</strong> — you can include a photo or GIF with your confession (max ${maxMb} MB).</p></div>
+            </div>
+          </div>
+
           <form id="message-form" class="stack-form">
-            <textarea name="message" maxlength="4000" placeholder="Write your message..." required></textarea>
+            <textarea name="message" maxlength="4000" placeholder="Write your message..." required autocomplete="off"></textarea>
             <div class="compose-row">
               <label class="upload-label" for="media-input">Add image/GIF</label>
               <span class="limit-copy">Max ${maxMb} MB</span>
@@ -554,14 +565,20 @@ async function renderPublicMessage(username) {
           mediaType = selectedFile.type;
         }
 
-        const { data, error } = await supabase.rpc('insert_anonymous_message', {
-          p_username: profile.username,
-          p_message: messageText,
-          p_media_path: mediaPath,
-          p_media_type: mediaType,
-        });
-
-        if (error) throw error;
+        try {
+          const { data, error } = await supabase.rpc('insert_anonymous_message', {
+            p_username: profile.username,
+            p_message: messageText,
+            p_media_path: mediaPath,
+            p_media_type: mediaType,
+          });
+          if (error) throw error;
+        } catch (rpcError) {
+          if (mediaPath) {
+            await supabase.storage.from('message-media').remove([mediaPath]);
+          }
+          throw rpcError;
+        }
 
         state.lastSubmissionAt = Date.now();
         localStorage.setItem('cetp-last-submit', String(state.lastSubmissionAt));
@@ -627,7 +644,7 @@ async function handleAuthSubmit(event) {
     window.history.replaceState(null, '', '/admin/dashboard');
     await route();
   } catch (error) {
-    setNotice(error.message || 'Authentication failed.', 'error');
+    setNotice('Authentication failed. Please check your credentials.', 'error');
     submitButton.disabled = false;
     submitButton.textContent = 'Sign in';
   }
@@ -642,7 +659,7 @@ async function handleDeleteMessage(id) {
 
   const { error } = await supabase.from('messages').delete().eq('id', id).eq('admin_id', state.user.id);
   if (error) {
-    setNotice(error.message || 'Message could not be deleted.', 'error');
+    setNotice('Message could not be deleted.', 'error');
     return;
   }
 
@@ -669,6 +686,12 @@ async function toggleMessagePin(id) {
 }
 
 async function moderateComment(id, status) {
+  // Find the message this comment belongs to
+  const comment = state.comments.find(c => c.id === id);
+  if (!comment) return;
+  const message = state.messages.find(m => m.id === comment.message_id && m.admin_id === state.user.id);
+  if (!message) throw new Error('Unauthorized');
+
   const { error } = await supabase.from('message_comments').update({ status }).eq('id', id);
   if (error) throw error;
   const messages = { approved: 'Comment approved and published.', pending: 'Comment removed from public view.', rejected: 'Comment rejected.' };
@@ -677,6 +700,16 @@ async function moderateComment(id, status) {
 
 async function deleteComment(id) {
   if (!window.confirm('Delete this anonymous response?')) return;
+  
+  // Find the message this comment belongs to for defense in depth
+  const comment = state.comments.find(c => c.id === id);
+  if (!comment) return;
+  const message = state.messages.find(m => m.id === comment.message_id && m.admin_id === state.user.id);
+  if (!message) {
+    setNotice('Unauthorized', 'error');
+    return;
+  }
+
   const { error } = await supabase.from('message_comments').delete().eq('id', id);
   if (error) throw error;
   await renderDashboard('Comment deleted.');
@@ -693,11 +726,37 @@ async function handleToggleRead(id) {
     .eq('admin_id', state.user.id);
 
   if (error) {
-    setNotice(error.message || 'The status update failed.', 'error');
+    setNotice('The status update failed.', 'error');
     return;
   }
 
   await renderDashboard();
+}
+
+async function handleDownloadMedia(id) {
+  const message = state.messages.find((item) => item.id === id);
+  if (!message?.media_path) {
+    setNotice('This message has no media attachment.', 'error');
+    return;
+  }
+
+  try {
+    const { data, error } = await supabase.storage.from('message-media').createSignedUrl(message.media_path, 300);
+    if (error || !data?.signedUrl) throw error || new Error('Could not create download link.');
+
+    const response = await fetch(data.signedUrl);
+    if (!response.ok) throw new Error('Download failed.');
+    const blob = await response.blob();
+
+    const extension = message.media_path.split('.').pop() || 'png';
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `attachment-${id}.${extension}`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 60000);
+  } catch (err) {
+    setNotice('The attachment could not be downloaded.', 'error');
+  }
 }
 
 async function handleDownloadImage(id) {
@@ -917,7 +976,7 @@ root.addEventListener('submit', async (event) => {
       if (error) throw error;
       await renderPublicConfessions('Response submitted for admin review.');
     } catch (error) {
-      notice.textContent = error.message || 'Your response could not be sent.';
+      notice.textContent = 'Your response could not be sent. Please try again.';
       notice.dataset.kind = 'error';
       submitButton.disabled = false;
     }
@@ -988,6 +1047,9 @@ root.addEventListener('click', async (event) => {
     case 'download-image':
       await handleDownloadImage(actionTarget.dataset.id);
       break;
+    case 'download-media':
+      await handleDownloadMedia(actionTarget.dataset.id);
+      break;
     case 'moderate-message':
       await moderateMessage(actionTarget.dataset.id, actionTarget.dataset.status);
       break;
@@ -1017,6 +1079,7 @@ root.addEventListener('click', async (event) => {
       break;
     }
   } catch (error) {
+    console.error(error);
     setNotice(error.message || 'The requested action failed.', 'error');
   }
 });
