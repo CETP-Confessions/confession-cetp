@@ -11,6 +11,7 @@ const state = {
   messages: [],
   comments: [],
   dashboardSection: 'inbox',
+  openTabs: ['inbox', 'pending', 'approved', 'rejected', 'pinned', 'comments'],
   commentStatus: 'pending',
   lastSubmissionAt: Number(localStorage.getItem('cetp-last-submit') || 0),
 };
@@ -273,11 +274,26 @@ async function renderDashboard(noticeMessage = '') {
             <div class="action-row"><button class="secondary-button" data-action="copy-link">Copy link</button><button class="secondary-button" data-action="open-link">Open link</button><button class="secondary-button" data-action="show-qr">QR code</button></div>
           </div>
           <nav class="dashboard-tabs" aria-label="Moderation sections">
-            ${sections.map(([key, label]) => `<button data-section="${key}" class="${state.dashboardSection === key ? 'active' : ''}">${label}</button>`).join('')}
+            ${state.openTabs.map((key) => {
+              const section = sections.find(s => s[0] === key);
+              if (!section) return '';
+              const label = section[1];
+              const isActive = state.dashboardSection === key;
+              return `<div class="dashboard-tab ${isActive ? 'active' : ''}">
+                <button data-section="${key}">${label}</button>
+                <button data-action="close-tab" data-tab="${key}" aria-label="Close tab" class="close-tab-btn">&times;</button>
+              </div>`;
+            }).join('')}
+            ${state.openTabs.length < sections.length ? `
+              <select class="add-tab-select" data-action="add-tab" aria-label="Add tab">
+                <option value="" disabled selected>+ Add Tab</option>
+                ${sections.filter(s => !state.openTabs.includes(s[0])).map(s => `<option value="${s[0]}">${s[1]}</option>`).join('')}
+              </select>
+            ` : ''}
           </nav>
           <div class="notice" data-notice aria-live="polite">${escapeHtml(noticeMessage)}</div>
           <p class="subcopy" style="margin-bottom: 1rem; font-size: 0.9rem;">Approved messages automatically expire 60 days after approval.</p>
-          ${state.dashboardSection === 'comments' ? commentsPanel : `
+          ${!state.dashboardSection ? '<div class="empty-state">No tabs open. Select or add a tab to view.</div>' : (state.dashboardSection === 'comments' ? commentsPanel : `
             <div class="inbox-header"><h2>${sections.find(([key]) => key === state.dashboardSection)?.[1] || 'Inbox'}</h2><span class="count-pill">${visibleMessages.length}</span></div>
             <div class="message-list">
               ${visibleMessages.length ? visibleMessages.map((message) => {
@@ -330,7 +346,7 @@ async function renderDashboard(noticeMessage = '') {
                 </article>`;
               }).join('') : '<div class="empty-state">No messages in this section.</div>'}
             </div>
-          `}
+          `)}
         </section>
       </main>
     `;
@@ -983,6 +999,17 @@ root.addEventListener('submit', async (event) => {
   }
 });
 
+root.addEventListener('change', async (event) => {
+  if (event.target.matches('[data-action="add-tab"]')) {
+    const tab = event.target.value;
+    if (tab && !state.openTabs.includes(tab)) {
+      state.openTabs.push(tab);
+      state.dashboardSection = tab;
+      await renderDashboard();
+    }
+  }
+});
+
 root.addEventListener('click', async (event) => {
   const sectionTarget = event.target.closest('[data-section]');
   if (sectionTarget) {
@@ -1005,6 +1032,15 @@ root.addEventListener('click', async (event) => {
 
   try {
     switch (action) {
+    case 'close-tab': {
+      const tab = actionTarget.dataset.tab;
+      state.openTabs = state.openTabs.filter(t => t !== tab);
+      if (state.dashboardSection === tab) {
+        state.dashboardSection = state.openTabs[0] || '';
+      }
+      await renderDashboard();
+      break;
+    }
     case 'logout':
       await handleLogout();
       break;

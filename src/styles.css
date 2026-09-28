@@ -129,10 +129,22 @@ button, input, textarea { font: inherit; }
 .comment-form { display: grid; gap: 16px; margin-top: 24px; }
 .comment-form textarea { background: #ffffff; border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
 
-.dashboard-tabs, .comment-filters { display: flex; flex-wrap: wrap; gap: 12px; margin: 32px 0 16px; border-bottom: 1px solid var(--line); padding-bottom: 16px; }
-.dashboard-tabs button, .comment-filters button { border: 1px solid transparent; border-radius: 99px; padding: 8px 16px; background: transparent; color: var(--muted); cursor: pointer; font-weight: 600; font-size: 0.95rem; transition: all 0.2s; }
-.dashboard-tabs button:hover, .comment-filters button:hover { background: var(--bg-soft); color: var(--text); }
-.dashboard-tabs button.active, .comment-filters button.active { background: var(--primary); color: #ffffff; border-color: var(--primary); }
+.dashboard-tabs, .comment-filters { display: flex; flex-wrap: wrap; gap: 12px; margin: 32px 0 16px; border-bottom: 1px solid var(--line); padding-bottom: 16px; align-items: center; }
+.comment-filters button { border: 1px solid transparent; border-radius: 99px; padding: 8px 16px; background: transparent; color: var(--muted); cursor: pointer; font-weight: 600; font-size: 0.95rem; transition: all 0.2s; }
+.comment-filters button:hover { background: var(--bg-soft); color: var(--text); }
+.comment-filters button.active { background: var(--primary); color: #ffffff; border-color: var(--primary); }
+
+.dashboard-tab { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 99px; background: transparent; transition: all 0.2s; }
+.dashboard-tab button[data-section] { border: none; background: transparent; color: var(--muted); cursor: pointer; font-weight: 600; font-size: 0.95rem; padding: 8px 4px 8px 16px; }
+.dashboard-tab .close-tab-btn { border: none; background: transparent; color: var(--muted); cursor: pointer; padding: 8px 16px 8px 8px; font-size: 1.2rem; line-height: 1; display: grid; place-items: center; }
+.dashboard-tab:hover { background: var(--bg-soft); }
+.dashboard-tab.active { background: var(--primary); border-color: var(--primary); }
+.dashboard-tab.active button { color: #ffffff; }
+.dashboard-tab.active .close-tab-btn { color: rgba(255, 255, 255, 0.7); }
+.dashboard-tab.active .close-tab-btn:hover { color: #ffffff; }
+
+.add-tab-select { border: 1px dashed var(--line); border-radius: 99px; padding: 8px 16px; background: transparent; color: var(--muted); cursor: pointer; font-weight: 600; font-size: 0.95rem; outline: none; appearance: none; -webkit-appearance: none; }
+.add-tab-select:hover { background: var(--bg-soft); color: var(--text); border-color: var(--muted); }
 
 .moderation-stats { grid-template-columns: repeat(5, minmax(140px, 1fr)); }
 .status-pending { background: #fef3c7; color: #d97706; }
@@ -146,18 +158,40 @@ button, input, textarea { font: inherit; }
 .comment-row .message-actions { border: none; padding: 0; margin-top: 12px; }
 
 @media (max-width: 840px) {
-  .hero-row { grid-template-columns: 1fr; gap: 32px; padding-top: 40px; }
+  .hero-row { grid-template-columns: 1fr; gap: 32px; padding-top: 60px; }
   .dashboard-shell { grid-template-columns: 1fr; }
-  .sidebar { position: relative; height: auto; border-right: none; border-bottom: 1px solid var(--line); padding: 24px; }
-  .logout-button { position: static; margin-top: 24px; width: 100%; }
-  .dashboard-content { padding: 24px; }
-  .stats-grid { grid-template-columns: 1fr; }
+  .sidebar { position: relative; height: auto; border-right: none; border-bottom: 1px solid var(--line); padding: 16px; }
+  .sidebar-nav { display: flex; overflow-x: auto; padding-bottom: 8px; gap: 8px; margin-top: 16px; }
+  .sidebar-nav a { flex-shrink: 0; }
+  .logout-button { position: static; margin-top: 16px; width: 100%; }
+  .dashboard-content { padding: 16px; }
+  .stats-grid { grid-template-columns: 1fr 1fr; gap: 12px; }
   .moderation-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .share-panel { flex-direction: column; align-items: stretch; }
-  .top-nav { padding: 20px 24px; flex-direction: column; gap: 16px; }
-  .public-page { padding: 160px 24px 60px; }
+  .share-panel { flex-direction: column; align-items: stretch; padding: 16px; margin-top: 24px; }
+  .top-nav { padding: 16px; flex-direction: column; gap: 16px; position: static; }
+  .public-page { padding: 100px 16px 40px; }
   .public-card-actions { flex-direction: column; align-items: stretch; }
-  .features-grid { grid-template-columns: 1fr; }
+  .features-grid { grid-template-columns: 1fr; gap: 16px; }
+  
+  .auth-panel, .config-card, .message-panel { padding: 24px; }
+  .hero-copy h1 { font-size: clamp(2.2rem, 8vw, 2.8rem); }
+  .auth-panel h1, .config-card h1, .message-panel h1 { font-size: clamp(2rem, 8vw, 2.4rem); }
+  .hero-card { height: 320px; }
+  .note-card { padding: 24px; }
+  .note-front p { font-size: 1.25rem; margin-bottom: 16px; }
+  
+  .page-shell { padding: 16px; }
+}
+
+@media (max-width: 480px) {
+  .stats-grid { grid-template-columns: 1fr; }
+  .moderation-stats { grid-template-columns: 1fr; }
+  .hero-actions { flex-direction: column; align-items: stretch; }
+  .hero-actions > * { width: 100%; text-align: center; }
+  .nav-actions { flex-direction: column; width: 100%; gap: 12px; }
+  .nav-actions a, .nav-actions button { width: 100%; }
+  .public-nav { padding: 16px; position: static; display: flex; flex-direction: column; gap: 16px; }
+  .public-brand { position: static; }
 }
 
 /* ── Public nav sits on light bg now ─────────────────── */
