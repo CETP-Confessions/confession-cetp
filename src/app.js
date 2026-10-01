@@ -1,10 +1,109 @@
 import './styles.css';
 import QRCode from 'qrcode';
+import { animate } from 'motion';
 import { supabase, supabaseConfig } from './supabase.js';
 
 const INBOX_USERNAME = encodeURIComponent(import.meta.env.VITE_INBOX_USERNAME || 'quietdrop');
 
 const root = document.querySelector('#app');
+let reactPageRoot = null;
+let reactPageMount = null;
+let reactRuntimePromise = null;
+
+function unmountReactPage() {
+  if (!reactPageRoot) return;
+  reactPageRoot.unmount();
+  reactPageRoot = null;
+  reactPageMount = null;
+}
+
+function renderLegacyMarkup(markup) {
+  unmountReactPage();
+  root.innerHTML = markup;
+}
+
+async function renderReactPage(pageName, props) {
+  const expectedPath = pageName === 'HomePage' ? '/' : '/public';
+  if (!reactRuntimePromise) {
+    reactRuntimePromise = Promise.all([
+      import('react'),
+      import('react-dom/client'),
+      import('./ui/PublicPages.jsx'),
+    ]);
+  }
+  const [{ createElement }, { createRoot }, pages] = await reactRuntimePromise;
+  const currentPath = window.location.pathname.replace(/\/+$/, '') || '/';
+  if (currentPath !== expectedPath) return;
+  const PageComponent = pages[pageName];
+
+  if (!reactPageRoot) {
+    root.innerHTML = '';
+    reactPageMount = document.createElement('div');
+    reactPageMount.className = 'react-page-root';
+    root.appendChild(reactPageMount);
+    reactPageRoot = createRoot(reactPageMount);
+  }
+  reactPageRoot.render(createElement(PageComponent, props));
+}
+
+const animatedPages = new WeakSet();
+const animatedCards = new WeakSet();
+const cardEntranceObserver = new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    animate(entry.target, { opacity: [0, 1], y: [7, 0] }, { duration: 0.24, ease: 'easeOut' });
+    cardEntranceObserver.unobserve(entry.target);
+  }
+}, { threshold: 0.08 });
+const routeTransitionObserver = new MutationObserver(() => {
+  document.querySelectorAll('.react-gradient-btn-mount:not([data-mounted])').forEach(el => {
+    el.dataset.mounted = 'true';
+    import('./ui/AppComponents.jsx').then(m => {
+      m.mountGradientButton(el, { children: el.dataset.label, type: el.dataset.type, className: "w-full text-center block" });
+      const form = el.closest('#auth-form');
+      if (form) syncAuthSubmitButton(form);
+    });
+  });
+  const navMount = document.getElementById('navbar-react-mount');
+  if (navMount && !navMount.dataset.mounted) {
+    navMount.dataset.mounted = 'true';
+    import('./ui/AppComponents.jsx').then(m => m.mountNavbar(navMount, { activePath: navMount.dataset.path }));
+  }
+  const sidebarMount = document.getElementById('sidebar-react-mount');
+  if (sidebarMount && !sidebarMount.dataset.mounted) {
+    sidebarMount.dataset.mounted = 'true';
+    import('./ui/AppComponents.jsx').then(m => {
+       m.mountSidebar(sidebarMount, {
+         activeSection: sidebarMount.dataset.section,
+         onSectionChange: (s) => { state.dashboardSection = s; renderDashboard(); },
+         onLogout: () => handleLogout(),
+       });
+    });
+  }
+
+  const page = root.firstElementChild;
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (page && !animatedPages.has(page)) {
+    animatedPages.add(page);
+    if (!reduceMotion) animate(page, { opacity: [0, 1], y: [5, 0] }, { duration: 0.2, ease: 'easeOut' });
+  }
+  if (reduceMotion) return;
+  root.querySelectorAll('.message-card, .public-message-card').forEach((card) => {
+    if (animatedCards.has(card)) return;
+    animatedCards.add(card);
+    card.style.opacity = '0';
+    card.style.transform = 'translateY(7px)';
+    cardEntranceObserver.observe(card);
+  });
+});
+routeTransitionObserver.observe(root, { childList: true, subtree: true });
+const mobileMenuAnimations = new WeakMap();
+let authLockTimer = 0;
+let authLockCheckSequence = 0;
+let dashboardLoadSequence = 0;
+let messageNotificationChannel = null;
+let messageNotificationAdminId = null;
+let messageNotificationStatus = 'offline';
 const state = {
   user: null,
   profile: null,
@@ -13,6 +112,8 @@ const state = {
   dashboardSection: 'inbox',
   openTabs: ['inbox', 'pending', 'approved', 'rejected', 'pinned', 'comments'],
   commentStatus: 'pending',
+  modalReturnFocus: null,
+  modalScrollPosition: 0,
   lastSubmissionAt: Number(localStorage.getItem('cetp-last-submit') || 0),
 };
 
@@ -31,6 +132,67 @@ const setNotice = (message = '', kind = 'info') => {
   notice.dataset.kind = kind;
 };
 
+function syncAuthSubmitButton(form) {
+  const button = form.querySelector('button[type="submit"]');
+  if (!button) return;
+  const busy = form.dataset.authSubmitting === 'true';
+  const locked = (Number(form.dataset.authLockoutUntil) || 0) > Date.now();
+  button.disabled = busy || locked;
+  if (busy) button.setAttribute('aria-busy', 'true');
+  else button.removeAttribute('aria-busy');
+}
+
+function startAuthLockout(form, seconds) {
+  const banner = form.querySelector('[data-auth-lockout]');
+  const countdown = form.querySelector('[data-auth-lockout-countdown]');
+  const lockedUntil = Date.now() + seconds * 1000;
+  form.dataset.authLockoutUntil = String(lockedUntil);
+  if (authLockTimer) window.clearInterval(authLockTimer);
+
+  const updateCountdown = () => {
+    if (!form.isConnected) {
+      window.clearInterval(authLockTimer);
+      authLockTimer = 0;
+      return;
+    }
+    const remaining = Math.max(0, Math.ceil((lockedUntil - Date.now()) / 1000));
+    if (!remaining) {
+      window.clearInterval(authLockTimer);
+      authLockTimer = 0;
+      delete form.dataset.authLockoutUntil;
+      syncAuthSubmitButton(form);
+      if (banner?.isConnected) banner.hidden = true;
+      setNotice('You can try signing in again.');
+      return;
+    }
+
+    const timeText = `${String(Math.floor(remaining / 60)).padStart(2, '0')}:${String(remaining % 60).padStart(2, '0')}`;
+    if (banner?.isConnected) banner.hidden = false;
+    if (countdown?.isConnected) countdown.textContent = timeText;
+    syncAuthSubmitButton(form);
+    setNotice('Too many failed attempts. Wait for the timer before trying again.', 'error');
+  };
+
+  updateCountdown();
+  authLockTimer = window.setInterval(updateCountdown, 1000);
+}
+
+async function refreshAdminLockout(form) {
+  const emailInput = form.elements.namedItem('email');
+  const email = String(emailInput?.value || '').trim();
+  if (!supabase || !email || !emailInput?.checkValidity()) return;
+
+  const requestSequence = ++authLockCheckSequence;
+  const { data, error } = await supabase.functions.invoke('admin-login', {
+    body: { action: 'check-lockout', email },
+  });
+  if (error || !form.isConnected || requestSequence !== authLockCheckSequence) return;
+  if (String(emailInput.value || '').trim() !== email) return;
+
+  const retryAfterSeconds = Number(data?.retryAfterSeconds) || 0;
+  if (data?.locked && retryAfterSeconds > 0) startAuthLockout(form, retryAfterSeconds);
+}
+
 function getPublicLink(username = '') {
   return `${window.location.origin}/message/${encodeURIComponent(username || state.profile?.username || 'quietdrop')}`;
 }
@@ -42,9 +204,9 @@ function getMaxUploadSizeMb() {
 
 function validateMediaFile(file) {
   if (!file) return;
-  const allowedTypes = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+  const allowedTypes = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'video/mp4', 'video/webm'];
   if (!allowedTypes.includes(file.type)) {
-    throw new Error('Only JPG, PNG, WebP, and GIF files are allowed.');
+    throw new Error('Choose a JPG, PNG, WebP, GIF, MP4, or WebM file.');
   }
   const maxBytes = getMaxUploadSizeMb() * 1024 * 1024;
   if (file.size > maxBytes) {
@@ -58,7 +220,6 @@ function formatRelativeTime(value) {
   const diffMs = Date.now() - date.getTime();
   const diffMinutes = Math.max(0, Math.round(diffMs / 60000));
 
-  if (diffMinutes < 1) return 'Just now';
   if (diffMinutes < 60) return `${diffMinutes} minute${diffMinutes === 1 ? '' : 's'} ago`;
 
   const diffHours = Math.round(diffMinutes / 60);
@@ -68,80 +229,172 @@ function formatRelativeTime(value) {
   return `${diffDays} day${diffDays === 1 ? '' : 's'} ago`;
 }
 
-function renderHome() {
-  root.innerHTML = `
-    <main class="page-shell home-shell">
-      <nav class="top-nav">
-        <a href="/" class="brand"><img src="/logo.jpg" class="brand-logo" alt="CETP Confessions logo" /><span>CETP Confessions</span></a>
-        <div class="nav-actions">
-          <a href="/public" class="nav-link">Public Board</a>
-          <a href="/admin/login" class="nav-link">Admin login</a>
-          <a href="/message/${INBOX_USERNAME}" class="primary-button">Send Confession</a>
-        </div>
-      </nav>
+function isMediaExpired(record) {
+  return Boolean(record.media_expired || (record.media_path && record.media_expires_at && Date.parse(record.media_expires_at) <= Date.now()));
+}
 
-      <section class="hero-row">
-        <div class="hero-copy">
-          <p class="eyebrow">The voice of our campus</p>
-          <h1>Unspoken thoughts, <span>shared securely.</span></h1>
-          <p class="subcopy">Welcome to CETP Confessions—the digital heartbeat of our campus. Whether it's a hidden crush, a hilarious classroom moment, or a heartfelt thank you, this is your safe space to speak freely without revealing who you are.</p>
-          
-          <div class="hero-actions">
-            <a href="/message/${INBOX_USERNAME}" class="primary-button">Drop a Confession</a>
-            <a href="/public" class="secondary-button">Read the Board</a>
-          </div>
+function publicNavbar(activePath = window.location.pathname) {
+  return `<div id="navbar-react-mount" data-path="${escapeHtml(activePath)}"></div>`;
+}
 
-          <div class="features-grid">
-            <div class="feature-item">
-              <h3>🔒 100% Anonymous</h3>
-              <p>Your identity is never logged or exposed. Speak your mind freely.</p>
-            </div>
-            <div class="feature-item">
-              <h3>🛡️ Moderated</h3>
-              <p>Every message is reviewed to keep our community safe and positive.</p>
-            </div>
-            <div class="feature-item">
-              <h3>⏱️ Ephemeral</h3>
-              <p>Approved posts auto-expire after 60 days to keep the feed fresh.</p>
-            </div>
-            <div class="feature-item">
-              <h3>💬 Interactive</h3>
-              <p>Reply to public confessions and keep the campus conversation going.</p>
-            </div>
-          </div>
-        </div>
+function setMobileNavOpen(nav, open) {
+  const toggle = nav.querySelector('[data-action="toggle-nav"]');
+  const menu = nav.querySelector('.nav-actions');
+  if (!toggle || !menu) return;
 
-        <div class="hero-card" aria-label="Anonymous note illustration">
-          <div class="note-card note-back">
-            <span>Anonymous</span>
-          </div>
-          <div class="note-card note-front">
-            <span>Anonymous</span>
-            <p>"To the person who returned my lost flash drive in the library—you saved my entire semester!"</p>
-            <small>— just now</small>
-          </div>
-        </div>
-      </section>
-    </main>
-  `;
+  mobileMenuAnimations.get(menu)?.stop();
+  mobileMenuAnimations.delete(menu);
+  menu.style.removeProperty('height');
+  menu.style.removeProperty('opacity');
+  menu.style.removeProperty('overflow');
+  toggle.setAttribute('aria-expanded', String(open));
+  toggle.setAttribute('aria-label', open ? 'Close navigation menu' : 'Open navigation menu');
+
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    nav.classList.toggle('menu-open', open);
+    (open ? menu.querySelector('a') : toggle)?.focus();
+    return;
+  }
+
+  if (open) {
+    nav.classList.add('menu-open');
+    menu.style.height = '0px';
+    menu.style.overflow = 'hidden';
+    const transition = animate(menu, { height: [0, menu.scrollHeight], opacity: [0, 1] }, { duration: 0.2, ease: 'easeOut' });
+    mobileMenuAnimations.set(menu, transition);
+    menu.querySelector('a')?.focus();
+    transition.finished.then(() => {
+      if (mobileMenuAnimations.get(menu) !== transition) return;
+      menu.style.height = 'auto';
+      menu.style.overflow = '';
+      mobileMenuAnimations.delete(menu);
+    });
+    return;
+  }
+
+  toggle.focus();
+  menu.style.height = `${menu.getBoundingClientRect().height}px`;
+  menu.style.overflow = 'hidden';
+  const transition = animate(menu, { height: [menu.scrollHeight, 0], opacity: [1, 0] }, { duration: 0.16, ease: 'easeIn' });
+  mobileMenuAnimations.set(menu, transition);
+  transition.finished.then(() => {
+    if (mobileMenuAnimations.get(menu) !== transition) return;
+    nav.classList.remove('menu-open');
+    menu.style.height = '';
+    menu.style.overflow = '';
+    menu.style.removeProperty('opacity');
+    mobileMenuAnimations.delete(menu);
+  });
+}
+
+function stopMessageNotifications() {
+  if (messageNotificationChannel && supabase) supabase.removeChannel(messageNotificationChannel);
+  messageNotificationChannel = null;
+  messageNotificationAdminId = null;
+  messageNotificationStatus = 'offline';
+}
+
+function subscribeToMessageNotifications(adminId) {
+  if (!supabase || (messageNotificationChannel && messageNotificationAdminId === adminId)) return;
+  stopMessageNotifications();
+  messageNotificationAdminId = adminId;
+  messageNotificationStatus = 'connecting';
+  messageNotificationChannel = supabase
+    .channel(`admin-message-notifications-${adminId}`)
+    .on('postgres_changes', {
+      event: 'INSERT',
+      schema: 'public',
+      table: 'messages',
+      filter: `admin_id=eq.${adminId}`,
+    }, (payload) => {
+      if (state.user?.id !== adminId || window.location.pathname !== '/admin/dashboard') return;
+
+      const message = payload.new;
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        try {
+          const notification = new Notification('New message received', {
+            body: 'A new anonymous message is waiting in your inbox.',
+            tag: `new-message-${message.id}`,
+          });
+          notification.onclick = () => {
+            window.focus();
+            if (window.location.pathname !== '/admin/dashboard') window.location.href = '/admin/dashboard';
+            notification.close();
+          };
+        } catch (error) {
+          console.warn('Browser notification could not be displayed.', error);
+        }
+      }
+
+      renderDashboard('A new message just arrived.');
+    })
+    .subscribe((status) => {
+      messageNotificationStatus = status === 'SUBSCRIBED' ? 'connected' : status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' ? 'error' : 'connecting';
+      const statusNode = document.querySelector('[data-realtime-status]');
+      if (!statusNode) return;
+      statusNode.textContent = messageNotificationStatus === 'connected' ? 'Live updates connected' : messageNotificationStatus === 'error' ? 'Live updates unavailable' : 'Connecting to live updates';
+      statusNode.dataset.status = messageNotificationStatus;
+    });
+}
+
+function notificationPermission() {
+  if (typeof Notification === 'undefined' || !window.isSecureContext) return 'unavailable';
+  return Notification.permission;
+}
+
+function notificationButtonMarkup() {
+  const permission = notificationPermission();
+  const labels = {
+    granted: 'Notifications enabled',
+    denied: 'Notifications blocked',
+    default: 'Enable notifications',
+    unavailable: 'Notifications unavailable',
+  };
+  const disabled = permission !== 'default';
+  return `<button class="secondary-button" data-action="enable-notifications" ${disabled ? 'disabled' : ''}>${labels[permission]}</button>`;
+}
+
+function realtimeStatusMarkup() {
+  const labels = { connected: 'Live updates connected', error: 'Live updates unavailable', connecting: 'Connecting to live updates', offline: 'Live updates offline' };
+  return `<span class="realtime-status" data-realtime-status data-status="${messageNotificationStatus}">${labels[messageNotificationStatus]}</span>`;
+}
+
+function backButton(label = 'Back to Home') {
+  return `<a class="back-button" href="/" aria-label="${escapeHtml(label)}">&larr; ${escapeHtml(label)}</a>`;
+}
+
+function mediaUploadControl(inputId, inputName, accept, detail = 'Images or video · Max 5 MB') {
+  return `<div class="media-upload-control rounded-xl border border-dashed border-slate-300 bg-slate-50 p-3 transition hover:border-violet-400 hover:bg-violet-50/50">
+    <label class="media-upload-label" for="${inputId}"><span class="media-upload-icon" aria-hidden="true">+</span><span><strong>Attach media</strong><small>${escapeHtml(detail)}</small></span></label>
+    <input class="media-file-input w-full rounded-lg border border-slate-200 bg-white text-sm text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-slate-900 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-slate-700 focus-visible:outline-2 focus-visible:outline-violet-500" id="${inputId}" name="${inputName}" type="file" accept="${accept}" />
+  </div>`;
+}
+
+async function renderHome() {
+  await renderReactPage('HomePage', { inboxUrl: `/message/${INBOX_USERNAME}` });
 }
 
 function renderAuth() {
   root.innerHTML = `
-    <main class="page-shell auth-shell">
+    <main class="auth-page">
+      ${publicNavbar('/admin/login')}
       <div class="auth-panel">
-        <a href="/" class="brand"><img src="/logo.jpg" class="brand-logo" alt="CETP Confessions logo" /><span>CETP Confessions</span></a>
         <p class="eyebrow">Admin login</p>
         <h1>Welcome back</h1>
         <form id="auth-form" class="stack-form">
           <label>Email<input name="email" type="email" autocomplete="email" required /></label>
           <label>Password<input name="password" type="password" minlength="8" autocomplete="current-password" required /></label>
+          <div class="auth-lockout" data-auth-lockout role="status" aria-live="polite" hidden><span>Sign-in temporarily paused</span><strong data-auth-lockout-countdown>05:00</strong></div>
           <div class="notice" data-notice aria-live="polite"></div>
-          <button type="submit" class="primary-button full-width">Sign in</button>
+          <div class="react-gradient-btn-mount" data-label="Sign in" data-type="submit" style="width:100%"></div>
         </form>
       </div>
     </main>
   `;
+  const loginForm = root.querySelector('#auth-form');
+  loginForm?.elements.namedItem('email')?.addEventListener('blur', () => {
+    refreshAdminLockout(loginForm);
+  });
 }
 
 async function loadProfileForUser() {
@@ -170,19 +423,27 @@ async function renderDashboard(noticeMessage = '') {
     return;
   }
 
+  const loadSequence = ++dashboardLoadSequence;
+  const adminId = state.user.id;
+  const isCurrentDashboardLoad = () => loadSequence === dashboardLoadSequence
+    && state.user?.id === adminId
+    && window.location.pathname === '/admin/dashboard';
+
   root.innerHTML = '<main class="page-shell config-shell"><div class="config-card"><p class="eyebrow">Admin workspace</p><h1>Loading your inbox…</h1></div></main>';
 
   try {
     await loadProfileForUser();
+    if (!isCurrentDashboardLoad()) return;
     if (!state.profile) {
       root.innerHTML = '<main class="page-shell config-shell"><div class="config-card"><p class="eyebrow">Admin profile unavailable</p><h1>No inbox is linked to this account.</h1><p class="subcopy">Ask the project administrator to link this account to an existing inbox.</p></div></main>';
       return;
     }
 
     const [{ data: messages, error: messageError }, { data: moderationCounts, error: countsError }] = await Promise.all([
-      supabase.from('messages').select('*').eq('admin_id', state.user.id).order('created_at', { ascending: false }),
+      supabase.from('messages').select('*').eq('admin_id', adminId).order('created_at', { ascending: false }),
       supabase.rpc('get_moderation_counts'),
     ]);
+    if (!isCurrentDashboardLoad()) return;
     if (messageError) throw messageError;
     if (countsError) throw countsError;
     state.messages = messages || [];
@@ -192,11 +453,10 @@ async function renderDashboard(noticeMessage = '') {
     if (messageIds.length > 0) {
       for (let i = 0; i < messageIds.length; i += 100) {
         const chunk = messageIds.slice(i, i + 100);
-        const { data, error: commentError } = await supabase
-          .from('message_comments')
-          .select('*')
-          .in('message_id', chunk)
-          .order('created_at', { ascending: false });
+        const { data, error: commentError } = await supabase.rpc('get_admin_comments', {
+          p_message_ids: chunk,
+        });
+        if (!isCurrentDashboardLoad()) return;
         if (commentError) throw commentError;
         comments.push(...(data || []));
       }
@@ -236,7 +496,8 @@ async function renderDashboard(noticeMessage = '') {
           return `<article class="message-card">
             <div class="message-topline"><span class="status status-${comment.status}">${comment.status}</span><time>${escapeHtml(formatRelativeTime(comment.created_at))}</time></div>
             <p class="context-copy">Confession: ${escapeHtml(parent?.message || 'Message unavailable')}</p>
-            <p>${escapeHtml(comment.comment_text || 'Response with media attachment')}</p>
+              <p>${escapeHtml(comment.comment_text || 'Response with media attachment')}</p>
+              ${isMediaExpired(comment) ? '<p class="media-fallback">Media expired</p>' : ''}
             <div class="message-actions">
               ${comment.status !== 'approved' ? `<button data-action="moderate-comment" data-id="${comment.id}" data-status="approved">Approve</button>` : '<button data-action="moderate-comment" data-id="' + comment.id + '" data-status="pending">Remove from Public</button>'}
               ${comment.status !== 'rejected' ? `<button data-action="moderate-comment" data-id="${comment.id}" data-status="rejected">Reject</button>` : ''}
@@ -249,23 +510,15 @@ async function renderDashboard(noticeMessage = '') {
 
     root.innerHTML = `
       <main class="dashboard-shell">
-        <aside class="sidebar">
-          <div class="brand-wrap"><a href="/" class="brand"><img src="/logo.jpg" class="brand-logo" alt="CETP Confessions logo" /><span>CETP Confessions Admin</span></a></div>
-          <nav class="sidebar-nav">
-            <a href="/admin/dashboard" class="active">Dashboard</a>
-            <a href="/public">Public View</a>
-          </nav>
-          <button class="logout-button" data-action="logout">Logout</button>
-        </aside>
+        <aside class="sidebar" style="padding:0; background:transparent; border:none; box-shadow:none; overflow:hidden;" id="sidebar-react-mount" data-section="${state.dashboardSection}"></aside>
         <section class="dashboard-content">
           <header class="dashboard-header">
             <div><p class="eyebrow">Moderation workspace</p><h1>${escapeHtml(state.profile.username)}'s inbox</h1></div>
-            <button class="secondary-button" data-action="refresh-dashboard">Refresh</button>
+            <div class="dashboard-header-actions">${realtimeStatusMarkup()}${notificationButtonMarkup()}<button class="secondary-button" data-action="refresh-dashboard">Refresh</button></div>
           </header>
           <section class="stats-grid moderation-stats">
             <div class="stat-card"><span>Pending messages</span><strong>${counts.pending}</strong></div>
             <div class="stat-card"><span>Approved messages</span><strong>${counts.approved}</strong></div>
-            <div class="stat-card"><span>Rejected messages</span><strong>${counts.rejected}</strong></div>
             <div class="stat-card"><span>Pending comments</span><strong>${counts.pendingComments}</strong></div>
             <div class="stat-card"><span>Pinned messages</span><strong>${counts.pinned}</strong></div>
           </section>
@@ -274,25 +527,9 @@ async function renderDashboard(noticeMessage = '') {
             <div class="action-row"><button class="secondary-button" data-action="copy-link">Copy link</button><button class="secondary-button" data-action="open-link">Open link</button><button class="secondary-button" data-action="show-qr">QR code</button></div>
           </div>
           <nav class="dashboard-tabs" aria-label="Moderation sections">
-            ${state.openTabs.map((key) => {
-              const section = sections.find(s => s[0] === key);
-              if (!section) return '';
-              const label = section[1];
-              const isActive = state.dashboardSection === key;
-              return `<div class="dashboard-tab ${isActive ? 'active' : ''}">
-                <button data-section="${key}">${label}</button>
-                <button data-action="close-tab" data-tab="${key}" aria-label="Close tab" class="close-tab-btn">&times;</button>
-              </div>`;
-            }).join('')}
-            ${state.openTabs.length < sections.length ? `
-              <select class="add-tab-select" data-action="add-tab" aria-label="Add tab">
-                <option value="" disabled selected>+ Add Tab</option>
-                ${sections.filter(s => !state.openTabs.includes(s[0])).map(s => `<option value="${s[0]}">${s[1]}</option>`).join('')}
-              </select>
-            ` : ''}
+            ${sections.map(([key, label]) => `<button type="button" class="dashboard-tab ${state.dashboardSection === key ? 'active' : ''}" data-section="${key}" aria-current="${state.dashboardSection === key ? 'page' : 'false'}">${label}</button>`).join('')}
           </nav>
           <div class="notice" data-notice aria-live="polite">${escapeHtml(noticeMessage)}</div>
-          <p class="subcopy" style="margin-bottom: 1rem; font-size: 0.9rem;">Approved messages automatically expire 60 days after approval.</p>
           ${!state.dashboardSection ? '<div class="empty-state">No tabs open. Select or add a tab to view.</div>' : (state.dashboardSection === 'comments' ? commentsPanel : `
             <div class="inbox-header"><h2>${sections.find(([key]) => key === state.dashboardSection)?.[1] || 'Inbox'}</h2><span class="count-pill">${visibleMessages.length}</span></div>
             <div class="message-list">
@@ -305,44 +542,20 @@ async function renderDashboard(noticeMessage = '') {
                   if (diff > 0) {
                     const d = Math.floor(diff / (1000 * 60 * 60 * 24));
                     const h = Math.floor((diff / (1000 * 60 * 60)) % 24);
-                    expiresText = `<span class="status status-pending" style="background:rgba(255,255,255,0.2);color:#fff;">Auto-deletes in ${d}d ${h}h</span>`;
+                    expiresText = `<span class="expiration-badge" aria-label="Message expires in ${d} days and ${h} hours">Expires in ${d}d ${h}h</span>`;
                   } else {
                     expiresText = `<span class="status status-rejected">Expired</span>`;
                   }
                 }
 
-                return `<article class="message-card" data-id="${message.id}">
+                return `<article class="message-card" data-id="${message.id}" data-admin-open="${message.id}" tabindex="0" role="button" aria-label="Open message details">
                   <div class="message-topline">
                     <span class="status status-${message.status}">${message.status}${message.is_pinned ? ' · pinned' : ''}</span>
                     ${expiresText}
                     <time>${escapeHtml(formatRelativeTime(message.created_at))}</time>
                   </div>
                   <p>${escapeHtml(message.message || 'Message with image attachment')}</p>
-                  <div class="media-preview" data-media-preview="${message.id}"></div>
-                  <div class="message-actions">
-                    ${message.status !== 'approved' ? `<button data-action="moderate-message" data-id="${message.id}" data-status="approved">Approve</button>` : `<button data-action="moderate-message" data-id="${message.id}" data-status="pending">Remove from Public</button>`}
-                    ${message.status !== 'rejected' ? `<button data-action="moderate-message" data-id="${message.id}" data-status="rejected">Reject</button>` : ''}
-                    <button data-action="toggle-pin" data-id="${message.id}">${message.is_pinned ? 'Unpin' : 'Pin'}</button>
-                    <button data-action="toggle-read" data-id="${message.id}">${message.is_read ? 'Mark unread' : 'Mark read'}</button>
-                    <button data-action="download-image" data-id="${message.id}">Download Image</button>
-                    ${message.media_path ? `<button data-action="download-media" data-id="${message.id}">Download Attachment</button>` : ''}
-                    <button class="danger-action" data-action="delete-message" data-id="${message.id}">Delete</button>
-                  </div>
-                  <details class="message-comments">
-                    <summary>Comments (${relatedComments.length})</summary>
-                    ${relatedComments.length ? relatedComments.map((comment) => `
-                      <div class="comment-row">
-                        <div>
-                          <span class="status status-${comment.status}">${comment.status}</span>
-                          <p>${escapeHtml(comment.comment_text || 'Response with media attachment')}</p>
-                        </div>
-                        <div class="message-actions">
-                          ${comment.status !== 'approved' ? `<button data-action="moderate-comment" data-id="${comment.id}" data-status="approved">Approve</button>` : `<button data-action="moderate-comment" data-id="${comment.id}" data-status="pending">Hide</button>`}
-                          ${comment.status !== 'rejected' ? `<button data-action="moderate-comment" data-id="${comment.id}" data-status="rejected">Reject</button>` : ''}
-                          <button class="danger-action" data-action="delete-comment" data-id="${comment.id}">Delete</button>
-                        </div>
-                      </div>`).join('') : '<p class="context-copy">No responses yet.</p>'}
-                  </details>
+                  <div class="message-card-meta"><span>${relatedComments.length} response${relatedComments.length === 1 ? '' : 's'}</span>${message.media_path ? '<span>Attachment</span>' : ''}${message.is_read ? '' : '<span>Unread</span>'}</div>
                 </article>`;
               }).join('') : '<div class="empty-state">No messages in this section.</div>'}
             </div>
@@ -364,7 +577,9 @@ async function renderDashboard(noticeMessage = '') {
         node.innerHTML = '<span class="media-fallback">Media unavailable</span>';
       }
     });
+    subscribeToMessageNotifications(adminId);
   } catch (error) {
+    if (!isCurrentDashboardLoad()) return;
     root.innerHTML = `<main class="page-shell config-shell"><div class="config-card"><p class="eyebrow">Dashboard unavailable</p><h1>Moderation data could not be loaded.</h1><p class="subcopy">${escapeHtml(error.message || 'Check the database migration and RLS policies.')}</p></div></main>`;
   }
 }
@@ -378,67 +593,35 @@ async function fetchProfileByUsername(username) {
   return data?.[0] || null;
 }
 
-function publicNavigation() {
-  return `
-    <nav class="top-nav public-nav">
-      <a href="/" class="brand"><img src="/logo.jpg" class="brand-logo" alt="CETP Confessions logo" /><span>CETP Confessions</span></a>
-      <div class="nav-actions">
-        <a href="/" class="nav-link">Home</a>
-        <a href="/public" class="nav-link">Public Board</a>
-        <a href="/admin/login" class="nav-link">Admin Login</a>
-        <a href="/message/${INBOX_USERNAME}" class="primary-button">Send Confession</a>
-      </div>
-    </nav>
-  `;
+async function renderPublicConfessions(noticeMessage = '') {
+  await renderReactPage('PublicPage', {
+    inboxUrl: `/message/${INBOX_USERNAME}`,
+    fetchPage: fetchPublicPage,
+    formatRelativeTime,
+    onOpenMessage: (messageId) => openMessageDetail(messageId, 'public'),
+    noticeMessage,
+  });
 }
 
-async function renderPublicConfessions(noticeMessage = '') {
-  root.innerHTML = `
-    <main class="public-page">
-      ${publicNavigation()}
-      <section class="public-content">
-        <header class="public-heading">
-          <p class="eyebrow">CETP Community Board</p>
-          <h1>Campus Confessions</h1>
-          <p class="subcopy">A safe, anonymous space where CETP students speak their minds. Every confession is moderated and stays live for 60 days.</p>
-        </header>
-        <div class="notice" data-notice aria-live="polite">${escapeHtml(noticeMessage || 'Loading confessions…')}</div>
-        <div class="public-message-list" id="public-message-list"></div>
-      </section>
-    </main>
-  `;
+async function fetchPublicPage(offset = 0) {
+  const { data, error } = await supabase.rpc('get_public_confessions', {
+    p_limit: 20,
+    p_offset: offset,
+  });
+  if (error) throw error;
 
-  try {
-    const { data: messages, error } = await supabase.rpc('get_public_confessions');
-    if (error) throw error;
-    const list = document.querySelector('#public-message-list');
-    document.querySelector('[data-notice]').textContent = noticeMessage;
-
-    if (!messages?.length) {
-      list.innerHTML = `
-        <div class="empty-state public-empty"><h2>No confessions have been published yet.</h2><p>Be the first to share something anonymously.</p><a href="/message/${INBOX_USERNAME}" class="primary-button">Send Anonymous Message</a></div>
-      `;
-      return;
+  return Promise.all((data || []).map(async (message) => {
+    if (!message.media_path || message.media_type?.startsWith('video/')) return message;
+    try {
+      const { data: mediaData, error: mediaError } = await supabase.storage
+        .from('message-media')
+        .createSignedUrl(message.media_path, 3600);
+      if (mediaError || !mediaData?.signedUrl) return { ...message, media_path: null };
+      return { ...message, media_url: mediaData.signedUrl };
+    } catch {
+      return { ...message, media_path: null };
     }
-
-    list.innerHTML = messages.map((message) => `
-      <article class="public-message-card" data-public-message="${message.id}">
-        <div class="message-topline"><span class="public-label">Anonymous Confession${message.is_pinned ? ' · Pinned' : ''}</span><time>${escapeHtml(formatRelativeTime(message.created_at))}</time></div>
-        <p class="public-message-text">${escapeHtml(message.message || 'Message with image attachment')}</p>
-        ${message.media_path ? `<div class="media-preview"><img data-public-media="${escapeHtml(message.media_path)}" alt="Anonymous confession attachment" /></div>` : ''}
-        <div class="public-card-actions"><button class="secondary-button" data-action="toggle-comments" data-id="${message.id}" aria-expanded="false">Comments (${Number(message.comment_count) || 0})</button><button class="primary-button" data-action="reply-comment" data-id="${message.id}">Reply</button></div>
-        <section class="comment-thread" data-comments="${message.id}" hidden></section>
-      </article>
-    `).join('');
-
-    for (const image of document.querySelectorAll('[data-public-media]')) {
-      const { data, error: mediaError } = await supabase.storage.from('message-media').createSignedUrl(image.dataset.publicMedia, 3600);
-      if (!mediaError && data?.signedUrl) image.src = data.signedUrl;
-      else image.closest('.media-preview')?.remove();
-    }
-  } catch (error) {
-    setNotice(error.message || 'Public confessions could not be loaded.', 'error');
-  }
+  }));
 }
 
 async function loadPublicComments(messageId) {
@@ -448,31 +631,94 @@ async function loadPublicComments(messageId) {
   return data || [];
 }
 
-async function openPublicComments(messageId, showReply = false) {
-  const thread = document.querySelector(`[data-comments="${CSS.escape(messageId)}"]`);
-  if (!thread) return;
-  thread.hidden = false;
-  const trigger = document.querySelector(`[data-action="toggle-comments"][data-id="${CSS.escape(messageId)}"]`);
-  trigger?.setAttribute('aria-expanded', 'true');
-  thread.innerHTML = '<p class="context-copy">Loading approved responses…</p>';
-
+async function openMessageDetail(messageId, mode = 'public') {
+  state.modalReturnFocus = document.activeElement;
+  state.modalScrollPosition = window.scrollY;
+  let message;
+  let comments = [];
   try {
-    const comments = await loadPublicComments(messageId);
-    thread.innerHTML = `
-      <div class="approved-comments">
-        ${comments.length ? comments.map((comment) => `<article class="public-comment"><span>Anonymous Comment</span><p>${escapeHtml(comment.comment_text || 'Response with media attachment')}</p><time>${escapeHtml(formatRelativeTime(comment.created_at))}</time></article>`).join('') : '<p class="context-copy">No approved responses yet.</p>'}
-      </div>
-      <form class="comment-form" data-comment-form="${messageId}">
-        <label class="sr-only" for="comment-${messageId}">Write an anonymous response</label>
-        <textarea id="comment-${messageId}" name="comment" maxlength="4000" placeholder="Write an anonymous response..." required></textarea>
-        <div class="notice" data-comment-notice="${messageId}" aria-live="polite"></div>
-        <button type="submit" class="primary-button">Send Anonymously</button>
-      </form>
-    `;
-    if (showReply) thread.querySelector('textarea')?.focus();
+    if (mode === 'admin') {
+      message = state.messages.find((item) => item.id === messageId);
+      comments = state.comments.filter((comment) => comment.message_id === messageId);
+      if (!message) throw new Error('Message is unavailable.');
+    } else {
+      const [{ data, error }, approvedComments] = await Promise.all([
+        supabase.rpc('get_public_message', { p_message_id: messageId }),
+        loadPublicComments(messageId),
+      ]);
+      if (error) throw error;
+      message = data?.[0];
+      comments = approvedComments;
+      if (!message) throw new Error('This confession is no longer available.');
+    }
+    const messageMediaExpired = isMediaExpired(message);
+    const initialPublicVersion = String(message.public_message || '').trim() || String(message.message || '');
+    const hasInitialPublicVersion = Boolean(initialPublicVersion.trim());
+    const modal = document.createElement('div');
+    modal.className = 'detail-modal-backdrop';
+    modal.dataset.modalMode = mode;
+    modal.innerHTML = `
+      <section class="detail-modal" role="dialog" aria-modal="true" aria-labelledby="detail-title" tabindex="-1">
+        <header class="detail-modal-header"><h2 id="detail-title">${mode === 'admin' ? 'Message details' : 'Anonymous confession'}</h2><button type="button" class="icon-button" data-action="close-modal" aria-label="Close message details">&times;</button></header>
+        <div class="detail-modal-grid">
+          <section class="detail-main">
+            ${mode === 'admin' ? `<div class="message-admin-meta"><span class="status status-${message.status}">${escapeHtml(message.status)}</span><span>${message.is_pinned ? 'Pinned' : 'Not pinned'}</span><time>${escapeHtml(new Date(message.created_at).toLocaleString())}</time><span>${message.approved_expires_at ? `Expires ${escapeHtml(new Date(message.approved_expires_at).toLocaleString())}` : 'Not published'}</span></div>` : `<div class="message-admin-meta"><time>${escapeHtml(new Date(message.created_at).toLocaleDateString())}</time>${message.is_pinned ? '<span class="pinned-label">Pinned</span>' : ''}</div>`}
+            ${mode === 'admin' ? `<label class="field-label" for="original-message">Original message</label><textarea id="original-message" class="original-message" readonly>${escapeHtml(message.message || '')}</textarea>
+              <label class="field-label" for="public-version">Public version</label><textarea id="public-version" class="public-version-editor" maxlength="4000">${escapeHtml(initialPublicVersion)}</textarea>
+              <div class="censor-controls"><button type="button" class="secondary-button" data-action="censor-selected" data-replacement="******">Censor Selected</button><button type="button" class="secondary-button" data-action="censor-selected" data-replacement="[censored]">[censored]</button><input type="text" id="custom-censor" aria-label="Custom censor replacement" placeholder="Replacement" /><button type="button" class="secondary-button" data-action="censor-custom">Apply to selection</button><textarea id="censor-phrases" rows="2" aria-label="Words or phrases to censor" placeholder="Words or phrases, one per line"></textarea><button type="button" class="secondary-button" data-action="censor-phrases">Censor matching phrases</button></div>
+              <button type="button" class="secondary-button" data-action="preview-public-version">Preview Public Version</button>
+              <div class="public-preview" data-public-preview hidden></div>` : `<p class="detail-message-text">${escapeHtml(message.public_message || '')}</p>`}
+            ${messageMediaExpired ? '<p class="media-fallback">Media expired</p>' : ''}
+            ${message.media_path && !messageMediaExpired ? `<div class="detail-media" data-detail-media="${escapeHtml(message.media_path)}" data-media-type="${escapeHtml(message.media_type || '')}"></div>` : ''}
+            ${mode === 'admin' ? `<div class="message-actions modal-actions">${message.status === 'approved' && message.public_message?.trim() ? `<button data-action="download-image" data-id="${message.id}">Download share image</button>` : ''}${message.media_path && !messageMediaExpired ? `<button data-action="download-media" data-id="${message.id}">Download attachment</button>` : ''}<button data-action="save-public-version" data-id="${message.id}" ${hasInitialPublicVersion ? '' : 'disabled'}>Save Public Version</button><button data-action="moderate-message" data-id="${message.id}" data-status="approved" ${hasInitialPublicVersion ? '' : 'disabled'}>Approve</button><button data-action="moderate-message" data-id="${message.id}" data-status="rejected">Reject</button><button data-action="toggle-pin" data-id="${message.id}">${message.is_pinned ? 'Unpin' : 'Pin'}</button><button data-action="toggle-public-status" data-id="${message.id}" ${message.status === 'approved' || hasInitialPublicVersion ? '' : 'disabled'}>${message.status === 'approved' ? 'Remove from Public' : 'Make Public'}</button><button class="danger-action" data-action="delete-message" data-id="${message.id}">Delete</button></div>` : ''}
+          </section>
+          <aside class="detail-comments"><h3>Comments <span>(${comments.length})</span></h3><div class="detail-comment-scroll" data-comment-list>
+            ${comments.length ? comments.map((comment) => `<article class="public-comment"><div class="comment-meta">${mode === 'admin' ? `<span class="status status-${comment.status}">${comment.status}</span>` : '<span>Anonymous</span>'}<time>${escapeHtml(formatRelativeTime(comment.created_at))}</time></div><p>${escapeHtml(mode === 'admin' ? comment.comment_text || 'Response with media attachment' : comment.comment_text || 'Response with media attachment')}</p>${isMediaExpired(comment) ? '<p class="media-fallback">Media expired</p>' : comment.media_path ? `<div data-detail-media="${escapeHtml(comment.media_path)}" data-media-type="${escapeHtml(comment.media_type || '')}"></div>` : ''}${mode === 'admin' ? `<div class="message-actions">${comment.media_path && !isMediaExpired(comment) ? `<button data-action="download-comment-media" data-id="${comment.id}" data-path="${escapeHtml(comment.media_path)}">Download attachment</button>` : ''}<button data-action="moderate-comment" data-id="${comment.id}" data-status="approved">Approve</button><button data-action="moderate-comment" data-id="${comment.id}" data-status="rejected">Reject</button><button class="danger-action" data-action="delete-comment" data-id="${comment.id}">Delete</button></div>` : ''}</article>`).join('') : '<p class="context-copy">No approved responses yet.</p>'}
+          </div>${mode === 'public' ? `<form class="comment-form" data-comment-form="${messageId}"><label class="sr-only" for="comment-${messageId}">Write an anonymous response</label><textarea id="comment-${messageId}" name="comment" maxlength="4000" placeholder="Write an anonymous response..."></textarea>${mediaUploadControl(`comment-media-${messageId}`, 'media', 'image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm')}<div class="notice" data-comment-notice aria-live="polite"></div><button type="submit" class="primary-button">Submit Comment</button></form>` : ''}</aside>
+        </div>
+      </section>`;
+    root.appendChild(modal);
+    document.body.classList.add('modal-open');
+    if (mode === 'admin') {
+      const editor = modal.querySelector('#public-version');
+      const saveButton = modal.querySelector('[data-action="save-public-version"]');
+      const approveButton = modal.querySelector('[data-action="moderate-message"][data-status="approved"]');
+      const publishButton = modal.querySelector('[data-action="toggle-public-status"]');
+      const updatePublishActions = () => {
+        const hasPublicVersion = Boolean(editor?.value.trim());
+        if (saveButton) saveButton.disabled = !hasPublicVersion;
+        if (approveButton) approveButton.disabled = !hasPublicVersion;
+        if (publishButton && message.status !== 'approved') publishButton.disabled = !hasPublicVersion;
+      };
+      editor?.addEventListener('input', updatePublishActions);
+      updatePublishActions();
+    }
+    modal.querySelector('[data-action="close-modal"]').focus();
+    modal.addEventListener('click', (event) => {
+      if (event.target === modal) closeMessageDetail();
+    });
+    for (const media of modal.querySelectorAll('[data-detail-media]')) {
+      const { data, error } = await supabase.storage.from('message-media').createSignedUrl(media.dataset.detailMedia, 300);
+      if (error || !data?.signedUrl) {
+        media.textContent = 'Media expired';
+      } else if (media.dataset.mediaType.startsWith('video/')) {
+        media.innerHTML = `<video controls preload="none" playsinline src="${escapeHtml(data.signedUrl)}"></video>`;
+      } else {
+        media.innerHTML = `<button type="button" class="media-image-button" data-action="open-media-viewer"><img loading="lazy" src="${escapeHtml(data.signedUrl)}" alt="Message attachment" /></button>`;
+      }
+    }
   } catch (error) {
-    thread.innerHTML = `<p class="notice" data-kind="error">${escapeHtml(error.message || 'Responses could not be loaded.')}</p>`;
+    setNotice(error.message || 'Message details could not be loaded.', 'error');
   }
+}
+
+function closeMessageDetail() {
+  const modal = document.querySelector('.detail-modal-backdrop');
+  if (!modal) return;
+  modal.remove();
+  document.body.classList.remove('modal-open');
+  window.scrollTo(0, state.modalScrollPosition);
+  state.modalReturnFocus?.focus?.();
 }
 
 async function renderPublicMessage(username) {
@@ -498,32 +744,28 @@ async function renderPublicMessage(username) {
 
     root.innerHTML = `
       <main class="page-shell public-shell">
-        <a href="/" class="brand public-brand"><img src="/logo.jpg" class="brand-logo" alt="CETP Confessions logo" /><span>CETP Confessions</span></a>
+        ${publicNavbar()}
         <section class="message-panel">
           <p class="eyebrow">Send an anonymous message</p>
           <h1>Send me an anonymous message</h1>
-          <p class="subcopy">Your identity isn't shown to the recipient.</p>
+              <p class="subcopy">Your identity isn't shown to the recipient.</p>
 
           <div class="page-description">
             <h3>📝 What is this?</h3>
             <p>CETP Confessions is a safe, anonymous space for our campus community. Share a hidden crush, a funny classroom moment, a heartfelt thank-you, or anything on your mind — without revealing who you are.</p>
             <div class="description-details">
-              <div class="detail-item"><span>🔒</span><p><strong>Completely anonymous</strong> — your identity is never logged or shared with anyone.</p></div>
+              <div class="detail-item"><span>🔒</span><p><strong>Anonymous to the recipient</strong> — your identity isn't shown to the recipient.</p></div>
               <div class="detail-item"><span>🛡️</span><p><strong>Moderated for safety</strong> — every message is reviewed by admins before it goes public.</p></div>
-              <div class="detail-item"><span>📎</span><p><strong>Attach images</strong> — you can include a photo or GIF with your confession (max ${maxMb} MB).</p></div>
+              <div class="detail-item"><span>📎</span><p><strong>Attach media</strong> — add a photo, GIF, or short video (max ${maxMb} MB).</p></div>
             </div>
           </div>
 
           <form id="message-form" class="stack-form">
             <textarea name="message" maxlength="4000" placeholder="Write your message..." required autocomplete="off"></textarea>
-            <div class="compose-row">
-              <label class="upload-label" for="media-input">Add image/GIF</label>
-              <span class="limit-copy">Max ${maxMb} MB</span>
-            </div>
-            <input id="media-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+            ${mediaUploadControl('media-input', 'media', 'image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm', `JPG, PNG, GIF, MP4 or WebM · Max ${maxMb} MB`)}
             <div id="file-preview" class="file-preview"></div>
             <div class="notice" data-notice aria-live="polite"></div>
-            <button type="submit" class="primary-button full-width">Send anonymously</button>
+            <div class="react-gradient-btn-mount" data-label="Send anonymously" data-type="submit" style="width:100%"></div>
           </form>
         </section>
       </main>
@@ -540,9 +782,16 @@ async function renderPublicMessage(username) {
         return;
       }
 
-      validateMediaFile(inputFile);
+      try { validateMediaFile(inputFile); } catch (error) {
+        selectedFile = null;
+        fileInput.value = '';
+        setNotice(error.message, 'error');
+        return;
+      }
       const previewUrl = URL.createObjectURL(inputFile);
-      filePreview.innerHTML = `<img src="${previewUrl}" alt="Selected upload preview" />`;
+      filePreview.innerHTML = inputFile.type.startsWith('video/')
+        ? `<video controls preload="metadata" src="${previewUrl}"></video>`
+        : `<img src="${previewUrl}" alt="Selected upload preview" />`;
     });
 
     document.querySelector('#message-form').addEventListener('submit', async (event) => {
@@ -602,15 +851,17 @@ async function renderPublicMessage(username) {
         root.innerHTML = `
           <main class="page-shell success-shell">
             <div class="config-card">
-              <p class="eyebrow">Message sent</p>
-              <h1>Message received.</h1>
-              <p class="subcopy">Your anonymous message is in ${escapeHtml(profile.username)}'s inbox for review. It will appear publicly only after admin approval.</p>
-              <a href="/" class="primary-button">Send another</a>
+              <p class="eyebrow">Success</p>
+              <h1>✓ Message Sent</h1>
+              <p class="subcopy">Your anonymous message has been sent successfully.</p>
+              <div class="hero-actions"><a href="/message/${encodeURIComponent(profile.username)}" class="primary-button">Send Another Message</a><a href="/" class="secondary-button">Back to Home</a></div>
             </div>
           </main>
         `;
       } catch (error) {
-        setNotice(error.message || 'Your message was not sent.', 'error');
+        setNotice('Unable to send your message. ' + (error.message || 'Please try again.'), 'error');
+          const retry = document.querySelector('[data-action="retry-message"]');
+          if (!retry) document.querySelector('#message-form')?.insertAdjacentHTML('beforeend', '<button type="submit" class="secondary-button" data-action="retry-message">Try Again</button>');
       }
     });
   } catch (error) {
@@ -634,11 +885,31 @@ async function handleLogin(data) {
     throw new Error('Email and password are required.');
   }
 
-  const { data: signInData, error } = await supabase.auth.signInWithPassword({ email, password });
-  if (error) throw error;
+  const { data: loginData, error } = await supabase.functions.invoke('admin-login', {
+    body: { email, password },
+  });
+  if (error) {
+    let responseBody = {};
+    if (error.context instanceof Response) {
+      responseBody = await error.context.clone().json().catch(() => ({}));
+    }
+    const authError = new Error(responseBody.message || 'Admin sign-in is temporarily unavailable.');
+    authError.retryAfterSeconds = Number(responseBody.retryAfterSeconds) || 0;
+    authError.attemptsRemaining = Number.isFinite(responseBody.attemptsRemaining)
+      ? Number(responseBody.attemptsRemaining)
+      : null;
+    throw authError;
+  }
 
-  state.user = signInData?.user ?? null;
-  if (!state.user) throw new Error('Sign-in completed without an active session. Please try again.');
+  const session = loginData?.session;
+  if (!session?.access_token || !session?.refresh_token) {
+    throw new Error('Sign-in completed without an active session. Please try again.');
+  }
+
+  const { data: sessionData, error: sessionError } = await supabase.auth.setSession(session);
+  if (sessionError) throw sessionError;
+  state.user = sessionData?.session?.user ?? null;
+  if (!state.user) throw new Error('The admin session could not be restored. Please try again.');
 }
 
 async function handleAuthSubmit(event) {
@@ -650,19 +921,35 @@ async function handleAuthSubmit(event) {
     return;
   }
 
+  if (form.dataset.authSubmitting === 'true') return;
+  const lockedUntil = Number(form.dataset.authLockoutUntil) || 0;
+  if (lockedUntil > Date.now()) {
+    startAuthLockout(form, Math.ceil((lockedUntil - Date.now()) / 1000));
+    return;
+  }
+
   const data = Object.fromEntries(new FormData(form));
-  const submitButton = form.querySelector('button[type="submit"]');
+  form.dataset.authSubmitting = 'true';
+  syncAuthSubmitButton(form);
   try {
-    submitButton.disabled = true;
-    submitButton.textContent = 'Signing in…';
     setNotice('Signing in…');
     await handleLogin(data);
+    delete form.dataset.authSubmitting;
     window.history.replaceState(null, '', '/admin/dashboard');
     await route();
   } catch (error) {
-    setNotice('Authentication failed. Please check your credentials.', 'error');
-    submitButton.disabled = false;
-    submitButton.textContent = 'Sign in';
+    delete form.dataset.authSubmitting;
+    const retryAfterSeconds = Number(error.retryAfterSeconds) || 0;
+    if (retryAfterSeconds > 0) {
+      startAuthLockout(form, retryAfterSeconds);
+      return;
+    }
+    const attemptsRemaining = error.attemptsRemaining;
+    const remainingNotice = Number.isFinite(attemptsRemaining)
+      ? ` ${attemptsRemaining} attempt${attemptsRemaining === 1 ? '' : 's'} remaining before a temporary lock.`
+      : '';
+    setNotice(`${error.message || 'Sign-in failed.'}${remainingNotice}`, 'error');
+    syncAuthSubmitButton(form);
   }
 }
 
@@ -673,23 +960,41 @@ async function handleDeleteMessage(id) {
   const confirmed = window.confirm('Delete this anonymous message?');
   if (!confirmed) return;
 
+  const relatedComments = state.comments.filter((comment) => comment.message_id === id);
+  const mediaPaths = [message.media_path, ...relatedComments.map((comment) => comment.media_path)].filter(Boolean);
+  if (mediaPaths.length) {
+    const { error: mediaError } = await supabase.storage.from('message-media').remove(mediaPaths);
+    if (mediaError) {
+      setNotice('Message media could not be deleted. The message was kept.', 'error');
+      return;
+    }
+  }
+
   const { error } = await supabase.from('messages').delete().eq('id', id).eq('admin_id', state.user.id);
   if (error) {
     setNotice('Message could not be deleted.', 'error');
     return;
   }
 
-  if (message.media_path) {
-    await supabase.storage.from('message-media').remove([message.media_path]);
-  }
-
+  closeMessageDetail();
   await renderDashboard();
 }
 
 async function moderateMessage(id, status) {
-  const { error } = await supabase.from('messages').update({ status }).eq('id', id).eq('admin_id', state.user.id);
+  const update = { status };
+  if (status === 'approved') {
+    const editor = document.querySelector('#public-version');
+    const message = state.messages.find((item) => item.id === id);
+    const publicMessage = editor ? editor.value.trim() : message?.public_message?.trim();
+    if (!publicMessage) throw new Error('Add and save a public version before approving.');
+    update.public_message = publicMessage;
+    update.public_edited_at = new Date().toISOString();
+    update.public_edited_by = state.user.id;
+  }
+  const { error } = await supabase.from('messages').update(update).eq('id', id).eq('admin_id', state.user.id);
   if (error) throw error;
   const messages = { approved: 'Message approved and published.', pending: 'Message removed from public view.', rejected: 'Message rejected.' };
+  closeMessageDetail();
   await renderDashboard(messages[status] || 'Message updated.');
 }
 
@@ -698,6 +1003,7 @@ async function toggleMessagePin(id) {
   if (!message) return;
   const { error } = await supabase.from('messages').update({ is_pinned: !message.is_pinned }).eq('id', id).eq('admin_id', state.user.id);
   if (error) throw error;
+  closeMessageDetail();
   await renderDashboard(message.is_pinned ? 'Message unpinned.' : 'Message pinned. Pinning does not publish a message.');
 }
 
@@ -711,6 +1017,7 @@ async function moderateComment(id, status) {
   const { error } = await supabase.from('message_comments').update({ status }).eq('id', id);
   if (error) throw error;
   const messages = { approved: 'Comment approved and published.', pending: 'Comment removed from public view.', rejected: 'Comment rejected.' };
+  closeMessageDetail();
   await renderDashboard(messages[status] || 'Comment updated.');
 }
 
@@ -726,8 +1033,13 @@ async function deleteComment(id) {
     return;
   }
 
+  if (comment.media_path) {
+    const { error: mediaError } = await supabase.storage.from('message-media').remove([comment.media_path]);
+    if (mediaError) throw mediaError;
+  }
   const { error } = await supabase.from('message_comments').delete().eq('id', id);
   if (error) throw error;
+  closeMessageDetail();
   await renderDashboard('Comment deleted.');
 }
 
@@ -749,71 +1061,147 @@ async function handleToggleRead(id) {
   await renderDashboard();
 }
 
-async function handleDownloadMedia(id) {
-  const message = state.messages.find((item) => item.id === id);
-  if (!message?.media_path) {
-    setNotice('This message has no media attachment.', 'error');
-    return;
-  }
-
+async function downloadSignedMedia(path, filename) {
   try {
-    const { data, error } = await supabase.storage.from('message-media').createSignedUrl(message.media_path, 300);
+    const { data, error } = await supabase.storage.from('message-media').createSignedUrl(path, 300);
     if (error || !data?.signedUrl) throw error || new Error('Could not create download link.');
 
     const response = await fetch(data.signedUrl);
     if (!response.ok) throw new Error('Download failed.');
     const blob = await response.blob();
 
-    const extension = message.media_path.split('.').pop() || 'png';
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `attachment-${id}.${extension}`;
+    link.download = filename;
     link.click();
     setTimeout(() => URL.revokeObjectURL(link.href), 60000);
-  } catch (err) {
+  } catch {
     setNotice('The attachment could not be downloaded.', 'error');
   }
 }
 
-async function handleDownloadImage(id) {
+async function handleDownloadMedia(id) {
   const message = state.messages.find((item) => item.id === id);
-  if (!message) return;
+  if (!message?.media_path) {
+    setNotice('This message has no media attachment.', 'error');
+    return;
+  }
+  const extension = message.media_path.split('.').pop() || 'bin';
+  await downloadSignedMedia(message.media_path, `attachment-${id}.${extension}`);
+}
 
-  // Pre-load the real logo
+async function handleDownloadCommentMedia(id, path) {
+  if (!path || !state.comments.some((comment) => comment.id === id && comment.media_path === path)) {
+    setNotice('This comment has no downloadable attachment.', 'error');
+    return;
+  }
+  const extension = path.split('.').pop() || 'bin';
+  await downloadSignedMedia(path, `comment-attachment-${id}.${extension}`);
+}
+
+async function handleDownloadShareImage(id) {
+  const message = state.messages.find((item) => item.id === id);
+  const publicText = String(message?.public_message || '').trim();
+  if (!message || message.status !== 'approved' || !publicText) {
+    setNotice('Only approved messages with a public version can be shared.', 'error');
+    return;
+  }
+
   const logoImg = await new Promise((resolve) => {
     const img = new Image();
-    img.crossOrigin = 'anonymous';
     img.onload = () => resolve(img);
     img.onerror = () => resolve(null);
     img.src = '/logo.jpg';
   });
 
   const canvas = document.createElement('canvas');
-  canvas.width = 1080;
-  canvas.height = 1080;
+  canvas.width = 1072;
   const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    setNotice('The share image could not be created.', 'error');
+    return;
+  }
 
-  // Background
+  const cardX = 183.5;
+  const cardY = 183.5;
+  const cardW = 704.8;
+  const cardR = 38.4;
+  const sidePadding = 64;
+  const maxWidth = cardW - sidePadding * 2;
+  const baseCardHeight = 704.8;
+  const textStartOffset = 240;
+  const footerGap = 120;
+  const footerOffset = 80;
+  const words = publicText.replace(/\s+/g, ' ').split(' ');
+
+  function wrapText(fontSize) {
+    ctx.font = `500 ${fontSize}px "DM Sans", sans-serif`;
+    const wrapped = [];
+    let line = '';
+
+    for (const word of words) {
+      if (ctx.measureText(word).width > maxWidth) {
+        if (line) wrapped.push(line);
+        line = '';
+        let segment = '';
+        for (const character of Array.from(word)) {
+          const candidate = segment + character;
+          if (segment && ctx.measureText(candidate).width > maxWidth) {
+            wrapped.push(segment);
+            segment = character;
+          } else {
+            segment = candidate;
+          }
+        }
+        line = segment;
+        continue;
+      }
+
+      const candidate = line ? `${line} ${word}` : word;
+      if (line && ctx.measureText(candidate).width > maxWidth) {
+        wrapped.push(line);
+        line = word;
+      } else {
+        line = candidate;
+      }
+    }
+    if (line) wrapped.push(line);
+    return wrapped;
+  }
+
+  const maxFontSize = 34 * (96 / 72);
+  const minFontSize = 18;
+  let fontSize = maxFontSize;
+  let lines = [];
+  let lineHeight = 0;
+  while (true) {
+    lines = wrapText(fontSize);
+    lineHeight = Math.round(fontSize * 1.38);
+    const textHeight = (lines.length - 1) * lineHeight + fontSize;
+    if (textHeight <= baseCardHeight - textStartOffset - footerGap || fontSize <= minFontSize) break;
+    fontSize = Math.max(minFontSize, fontSize - 2);
+  }
+
+  const textHeight = (lines.length - 1) * lineHeight + fontSize;
+  const cardH = Math.max(baseCardHeight, textStartOffset + textHeight + footerGap);
+  canvas.height = Math.ceil(cardY * 2 + cardH);
+
   ctx.fillStyle = '#7b6faf';
-  ctx.fillRect(0, 0, 1080, 1080);
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // White Card with rounded corners
-  const cardX = 100, cardY = 100, cardW = 880, cardH = 880, r = 48;
   ctx.fillStyle = '#ffffff';
   ctx.beginPath();
-  ctx.moveTo(cardX + r, cardY);
-  ctx.arcTo(cardX + cardW, cardY, cardX + cardW, cardY + cardH, r);
-  ctx.arcTo(cardX + cardW, cardY + cardH, cardX, cardY + cardH, r);
-  ctx.arcTo(cardX, cardY + cardH, cardX, cardY, r);
-  ctx.arcTo(cardX, cardY, cardX + cardW, cardY, r);
+  ctx.moveTo(cardX + cardR, cardY);
+  ctx.arcTo(cardX + cardW, cardY, cardX + cardW, cardY + cardH, cardR);
+  ctx.arcTo(cardX + cardW, cardY + cardH, cardX, cardY + cardH, cardR);
+  ctx.arcTo(cardX, cardY + cardH, cardX, cardY, cardR);
+  ctx.arcTo(cardX, cardY, cardX + cardW, cardY, cardR);
   ctx.closePath();
   ctx.fill();
 
-  // Draw actual logo image in circle clip
-  const logoSize = 110;
-  const logoX = cardX + 80;
-  const logoY = cardY + 80;
-
+  const logoSize = 88;
+  const logoX = cardX + sidePadding;
+  const logoY = cardY + 64;
   if (logoImg) {
     ctx.save();
     ctx.beginPath();
@@ -822,82 +1210,76 @@ async function handleDownloadImage(id) {
     ctx.drawImage(logoImg, logoX, logoY, logoSize, logoSize);
     ctx.restore();
   } else {
-    // Fallback circle if logo fails to load
-    ctx.fillStyle = '#7b6faf';
+    ctx.fillStyle = '#36336f';
     ctx.beginPath();
     ctx.arc(logoX + logoSize / 2, logoY + logoSize / 2, logoSize / 2, 0, Math.PI * 2);
     ctx.fill();
     ctx.fillStyle = '#fff';
-    ctx.font = 'bold 36px sans-serif';
+    ctx.font = '700 30px "DM Sans", sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText('C', logoX + logoSize / 2, logoY + logoSize / 2 + 13);
   }
 
-  // Header Texts
   ctx.textAlign = 'left';
   ctx.fillStyle = '#0f172a';
-  ctx.font = '700 44px Inter, sans-serif';
-  ctx.fillText('Cetp Confessions', logoX + logoSize + 24, logoY + 52);
+  ctx.font = '700 34px "DM Sans", sans-serif';
+  ctx.fillText('Cetp Confessions', logoX + logoSize + 19, logoY + 42);
   ctx.fillStyle = '#64748b';
-  ctx.font = '400 30px Inter, sans-serif';
-  ctx.fillText('@confession.cetp', logoX + logoSize + 24, logoY + 96);
+  ctx.font = '400 24px "DM Sans", sans-serif';
+  ctx.fillText('@confession.cetp', logoX + logoSize + 19, logoY + 77);
 
-  // Divider under header
   ctx.strokeStyle = '#e2e8f0';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(cardX + 80, cardY + 220);
-  ctx.lineTo(cardX + cardW - 80, cardY + 220);
+  ctx.moveTo(cardX + sidePadding, cardY + 176);
+  ctx.lineTo(cardX + cardW - sidePadding, cardY + 176);
   ctx.stroke();
 
-  // Confession Text Wrapping
   ctx.fillStyle = '#0f172a';
-  ctx.font = '500 46px Inter, sans-serif';
-  const words = (message.message || '').split(' ');
-  let line = '';
-  let textY = cardY + 300;
-  const maxWidth = cardW - 160;
+  ctx.font = `500 ${fontSize}px "DM Sans", sans-serif`;
+  const textStartY = cardY + textStartOffset;
+  lines.forEach((line, index) => {
+    ctx.fillText(line, cardX + sidePadding, textStartY + index * lineHeight);
+  });
 
-  for (let i = 0; i < words.length; i++) {
-    const testLine = line + words[i] + ' ';
-    if (ctx.measureText(testLine).width > maxWidth && i > 0) {
-      ctx.fillText(line.trim(), cardX + 80, textY);
-      line = words[i] + ' ';
-      textY += 66;
-      if (textY > cardY + cardH - 160) { ctx.fillText('…', cardX + 80, textY); break; }
-    } else {
-      line = testLine;
-    }
-  }
-  if (textY <= cardY + cardH - 160) ctx.fillText(line.trim(), cardX + 80, textY);
-
-  // Bottom separator
-  ctx.strokeStyle = '#e2e8f0';
-  ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(cardX + 80, cardY + cardH - 100);
-  ctx.lineTo(cardX + cardW - 80, cardY + cardH - 100);
+  ctx.moveTo(cardX + sidePadding, cardY + cardH - footerOffset);
+  ctx.lineTo(cardX + cardW - sidePadding, cardY + cardH - footerOffset);
   ctx.stroke();
 
-  // Download
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+  if (!blob) {
+    setNotice('The share image could not be created.', 'error');
+    return;
+  }
+
   const link = document.createElement('a');
   link.download = `confession-${id}.png`;
-  link.href = canvas.toDataURL('image/png');
+  link.href = URL.createObjectURL(blob);
   link.click();
+  window.setTimeout(() => URL.revokeObjectURL(link.href), 60000);
 }
 
 
 async function handleLogout() {
   if (!supabase) return;
-  await supabase.auth.signOut();
+  dashboardLoadSequence += 1;
+  stopMessageNotifications();
   state.user = null;
   state.profile = null;
-  location.href = '/admin/login';
+  window.history.replaceState(null, '', '/admin/login');
+  renderAuth('login');
+  const { error } = await supabase.auth.signOut();
+  if (error) setNotice('Could not clear the server session. Please try again.', 'error');
 }
 
 async function route() {
+  const pathname = window.location.pathname.replace(/\/+$/, '') || '/';
+  if (pathname !== '/admin/dashboard') stopMessageNotifications();
+  if (pathname !== '/' && pathname !== '/public') unmountReactPage();
+
   if (!supabaseConfig.isReady) {
-    root.innerHTML = `
+    renderLegacyMarkup(`
       <main class="page-shell config-shell">
         <div class="config-card">
           <p class="eyebrow">Setup required</p>
@@ -905,16 +1287,8 @@ async function route() {
           <p class="subcopy">Add your Vite Supabase URL and anon key to the environment variables before using the app.</p>
         </div>
       </main>
-    `;
+    `);
     return;
-  }
-
-  const pathname = window.location.pathname.replace(/\/+$/, '') || '/';
-
-  if (state.user && !pathname.startsWith('/admin')) {
-    await supabase.auth.signOut();
-    state.user = null;
-    state.profile = null;
   }
 
   if (pathname === '/admin/login') {
@@ -954,11 +1328,11 @@ async function route() {
   }
 
   if (pathname === '/') {
-    renderHome();
+    await renderHome();
     return;
   }
 
-  root.innerHTML = '<main class="page-shell config-shell"><div class="config-card"><p class="eyebrow">Page not found</p><h1>This page does not exist.</h1><a href="/" class="primary-button">Return home</a></div></main>';
+  renderLegacyMarkup('<main class="page-shell config-shell"><div class="config-card"><p class="eyebrow">Page not found</p><h1>This page does not exist.</h1><a href="/" class="primary-button">Return home</a></div></main>');
 }
 
 root.addEventListener('submit', async (event) => {
@@ -971,27 +1345,51 @@ root.addEventListener('submit', async (event) => {
   if (commentForm) {
     event.preventDefault();
     const messageId = commentForm.dataset.commentForm;
-    const commentText = new FormData(commentForm).get('comment')?.toString().trim() || '';
+    const formData = new FormData(commentForm);
+    const commentText = formData.get('comment')?.toString().trim() || '';
+    const mediaFile = formData.get('media');
     const notice = commentForm.querySelector('[data-comment-notice]');
-    if (!commentText) {
-      notice.textContent = 'Write a response before sending.';
+    if (!commentText && (!(mediaFile instanceof File) || !mediaFile.size)) {
+      notice.textContent = 'Write a response or attach media before sending.';
       notice.dataset.kind = 'error';
       return;
+    }
+    if (mediaFile instanceof File && mediaFile.size) {
+      try { validateMediaFile(mediaFile); } catch (error) {
+        notice.textContent = error.message;
+        notice.dataset.kind = 'error';
+        return;
+      }
     }
 
     const submitButton = commentForm.querySelector('button[type="submit"]');
     submitButton.disabled = true;
     notice.textContent = 'Sending for admin review…';
+    let mediaPath = null;
     try {
+      if (mediaFile instanceof File && mediaFile.size) {
+        const extension = mediaFile.name.split('.').pop() || 'bin';
+        const uploadPath = `${messageId}/${Date.now()}-${Math.random().toString(36).slice(2)}.${extension}`;
+        const { data, error } = await supabase.storage.from('message-media').upload(uploadPath, mediaFile, {
+          contentType: mediaFile.type,
+          cacheControl: '3600',
+          upsert: false,
+        });
+        if (error) throw error;
+        mediaPath = data.path;
+      }
       const { error } = await supabase.rpc('submit_anonymous_comment', {
         p_message_id: messageId,
         p_comment_text: commentText,
-        p_media_path: null,
-        p_media_type: null,
+        p_media_path: mediaPath,
+        p_media_type: mediaFile instanceof File && mediaFile.size ? mediaFile.type : null,
       });
       if (error) throw error;
-      await renderPublicConfessions('Response submitted for admin review.');
+      notice.textContent = 'Your response was sent for review.';
+      notice.dataset.kind = 'success';
+      commentForm.reset();
     } catch (error) {
+      if (mediaPath) await supabase.storage.from('message-media').remove([mediaPath]);
       notice.textContent = 'Your response could not be sent. Please try again.';
       notice.dataset.kind = 'error';
       submitButton.disabled = false;
@@ -1026,12 +1424,93 @@ root.addEventListener('click', async (event) => {
   }
 
   const actionTarget = event.target.closest('[data-action]');
-  if (!actionTarget) return;
+  if (!actionTarget) {
+    const adminCard = event.target.closest('[data-admin-open]');
+    if (adminCard) await openMessageDetail(adminCard.dataset.adminOpen, 'admin');
+    return;
+  }
 
   const action = actionTarget.dataset.action;
 
   try {
     switch (action) {
+    case 'toggle-nav': {
+      const nav = actionTarget.closest('.public-nav');
+      const open = actionTarget.getAttribute('aria-expanded') !== 'true';
+      if (nav) setMobileNavOpen(nav, open);
+      break;
+    }
+    case 'close-modal':
+      closeMessageDetail();
+      break;
+    case 'save-public-version': {
+      const id = actionTarget.dataset.id;
+      const publicMessage = document.querySelector('#public-version')?.value.trim();
+      if (!publicMessage) throw new Error('The public version cannot be empty.');
+      const { error } = await supabase.from('messages').update({
+        public_message: publicMessage,
+        public_edited_at: new Date().toISOString(),
+        public_edited_by: state.user.id,
+      }).eq('id', id).eq('admin_id', state.user.id);
+      if (error) throw error;
+      setNotice('Public version saved.', 'success');
+      closeMessageDetail();
+      await renderDashboard('Public version saved.');
+      break;
+    }
+    case 'preview-public-version': {
+      const editor = document.querySelector('#public-version');
+      const preview = document.querySelector('[data-public-preview]');
+      if (!editor || !preview) break;
+      preview.textContent = editor.value;
+      preview.hidden = !preview.hidden;
+      break;
+    }
+    case 'censor-selected':
+    case 'censor-custom': {
+      const editor = document.querySelector('#public-version');
+      if (!editor || editor.selectionStart === editor.selectionEnd) throw new Error('Select text in the public version first.');
+      const replacement = action === 'censor-selected' ? actionTarget.dataset.replacement : document.querySelector('#custom-censor')?.value;
+      if (!replacement) throw new Error('Enter a replacement first.');
+      const start = editor.selectionStart;
+      const end = editor.selectionEnd;
+      editor.setRangeText(replacement, start, end, 'select');
+      editor.focus();
+      break;
+    }
+    case 'censor-phrases': {
+      const editor = document.querySelector('#public-version');
+      const phrases = document.querySelector('#censor-phrases')?.value.split('\n').map((item) => item.trim()).filter(Boolean) || [];
+      const replacement = document.querySelector('#custom-censor')?.value || '******';
+      if (!editor || !phrases.length) throw new Error('Enter one or more words or phrases to censor.');
+      const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      let result = editor.value;
+      for (const phrase of phrases) {
+        const pattern = new RegExp(`\\b${escapeRegExp(phrase)}\\b`, 'gi');
+        result = result.replace(pattern, replacement);
+      }
+      editor.value = result;
+      break;
+    }
+    case 'toggle-public-status': {
+      const id = actionTarget.dataset.id;
+      const message = state.messages.find((item) => item.id === id);
+      await moderateMessage(id, message?.status === 'approved' ? 'pending' : 'approved');
+      break;
+    }
+    case 'open-media-viewer': {
+      const image = actionTarget.querySelector('img');
+      if (!image) break;
+      const viewer = document.createElement('div');
+      viewer.className = 'media-viewer-backdrop';
+      viewer.innerHTML = `<button type="button" class="icon-button" data-action="close-media-viewer" aria-label="Close image viewer">&times;</button><img src="${escapeHtml(image.src)}" alt="Enlarged message attachment" />`;
+      document.body.appendChild(viewer);
+      viewer.querySelector('button').focus();
+      break;
+    }
+    case 'close-media-viewer':
+      document.querySelector('.media-viewer-backdrop')?.remove();
+      break;
     case 'close-tab': {
       const tab = actionTarget.dataset.tab;
       state.openTabs = state.openTabs.filter(t => t !== tab);
@@ -1074,6 +1553,15 @@ root.addEventListener('click', async (event) => {
     case 'refresh-dashboard':
       await renderDashboard();
       break;
+    case 'enable-notifications': {
+      if (notificationPermission() !== 'default') break;
+      const permission = await Notification.requestPermission();
+      const notice = permission === 'granted'
+        ? 'Browser notifications are enabled.'
+        : 'Browser notifications were not enabled.';
+      await renderDashboard(notice);
+      break;
+    }
     case 'delete-message':
       await handleDeleteMessage(actionTarget.dataset.id);
       break;
@@ -1081,10 +1569,13 @@ root.addEventListener('click', async (event) => {
       await handleToggleRead(actionTarget.dataset.id);
       break;
     case 'download-image':
-      await handleDownloadImage(actionTarget.dataset.id);
+      await handleDownloadShareImage(actionTarget.dataset.id);
       break;
     case 'download-media':
       await handleDownloadMedia(actionTarget.dataset.id);
+      break;
+    case 'download-comment-media':
+      await handleDownloadCommentMedia(actionTarget.dataset.id, actionTarget.dataset.path);
       break;
     case 'moderate-message':
       await moderateMessage(actionTarget.dataset.id, actionTarget.dataset.status);
@@ -1121,8 +1612,17 @@ root.addEventListener('click', async (event) => {
 });
 
 if (supabase) {
-  supabase.auth.onAuthStateChange((_event, session) => {
+  supabase.auth.onAuthStateChange((event, session) => {
     state.user = session?.user ?? null;
+    if (event === 'SIGNED_OUT') {
+      dashboardLoadSequence += 1;
+      stopMessageNotifications();
+      state.profile = null;
+      if (window.location.pathname === '/admin/dashboard') {
+        window.history.replaceState(null, '', '/admin/login');
+        renderAuth('login');
+      }
+    }
   });
 
   (async () => {
@@ -1140,3 +1640,68 @@ if (supabase) {
 }
 
 window.addEventListener('popstate', route);
+
+document.addEventListener('click', (event) => {
+  const viewer = document.querySelector('.media-viewer-backdrop');
+  if (viewer && (event.target === viewer || event.target.closest('[data-action="close-media-viewer"]'))) {
+    viewer.remove();
+    return;
+  }
+  const link = event.target.closest('.public-nav a');
+  if (!link) return;
+  const nav = link.closest('.public-nav');
+  if (nav?.classList.contains('menu-open')) setMobileNavOpen(nav, false);
+});
+
+document.addEventListener('keydown', (event) => {
+  const viewer = document.querySelector('.media-viewer-backdrop');
+  if (viewer && event.key === 'Escape') {
+    viewer.remove();
+    return;
+  }
+  const mobileNav = document.querySelector('.public-nav.menu-open');
+  if (mobileNav && event.key === 'Escape') {
+    event.preventDefault();
+    setMobileNavOpen(mobileNav, false);
+    return;
+  }
+  if (mobileNav && event.key === 'Tab') {
+    const navFocusables = [...mobileNav.querySelectorAll('.menu-toggle, .nav-actions a')];
+    const firstNavItem = navFocusables[0];
+    const lastNavItem = navFocusables[navFocusables.length - 1];
+    if (event.shiftKey && document.activeElement === firstNavItem) {
+      event.preventDefault();
+      lastNavItem.focus();
+    } else if (!event.shiftKey && document.activeElement === lastNavItem) {
+      event.preventDefault();
+      firstNavItem.focus();
+    }
+  }
+  const modal = document.querySelector('.detail-modal-backdrop');
+  if (!modal) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeMessageDetail();
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  const focusable = [...modal.querySelectorAll('button:not([disabled]), a[href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex="0"]')]
+    .filter((element) => !element.closest('[hidden]'));
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+});
+
+document.addEventListener('keydown', async (event) => {
+  if ((event.key === 'Enter' || event.key === ' ') && event.target.matches('[data-admin-open]')) {
+    event.preventDefault();
+    await openMessageDetail(event.target.dataset.adminOpen, 'admin');
+  }
+});

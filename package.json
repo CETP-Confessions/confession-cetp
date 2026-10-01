@@ -9,10 +9,21 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@radix-ui/react-tabs": "^1.1.21",
     "@supabase/supabase-js": "^2.56.0",
-    "qrcode": "^1.5.4"
+    "@tabler/icons-react": "^3.48.0",
+    "clsx": "^2.1.1",
+    "motion": "^13.4.6",
+    "qrcode": "^1.5.4",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "tailwind-merge": "^3.7.0"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@vitejs/plugin-react": "^4.7.0",
+    "supabase": "^2.118.0",
+    "tailwindcss": "^4.3.3",
     "vite": "^6.3.5"
   }
 }

@@ -224,7 +224,8 @@ as $$
   where m.admin_id = auth.uid();
 $$;
 
-create or replace function public.get_public_comments(p_message_id uuid)
+drop function if exists public.get_public_comments(uuid);
+create function public.get_public_comments(p_message_id uuid)
 returns table (
   id uuid,
   message_id uuid,
