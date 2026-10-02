@@ -74,6 +74,8 @@ Set these Vercel environment variables on the server runtime: `SUPABASE_URL`, `S
 
 In Supabase Auth URL Configuration, allow the recovery redirect for your deployed site (for example `https://YOUR_DOMAIN/admin/login*`) and local development (`http://localhost:5173/admin/login*`). The password reset email returns to the app to set the new password.
 
+Password recovery also requires a working email provider. Configure custom SMTP in Supabase Authentication settings with a verified sender; Supabase's default mail service is restricted and may not deliver recovery messages to arbitrary addresses.
+
 ## Scheduled cleanup setup
 
 Deploy `cleanup-expired-media` manually after applying the migrations. Set the Edge Function secret using `supabase secrets set CLEANUP_FUNCTION_SECRET=<random-secret>`; Supabase supplies `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` to the function runtime. Before applying `202609290002_scheduled_cleanup.sql`, add matching values to Supabase Vault:

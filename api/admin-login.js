@@ -112,7 +112,26 @@ export default async function handler(req, res) {
     auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
   });
   const { data, error } = await auth.auth.signInWithPassword({ email, password });
-  if (error || !data.session?.access_token || !data.session.refresh_token) {
+  const invalidCredentials = error?.status === 400
+    && (error.code === 'invalid_credentials' || /invalid login credentials/i.test(error.message || ''));
+  if (error && !invalidCredentials) {
+    console.error('[admin-login] Supabase Auth sign-in failed:', {
+      status: error.status,
+      code: error.code,
+      message: error.message,
+    });
+    if (error.code === 'email_not_confirmed') {
+      return json(res, 403, { message: 'Confirm the admin account email in Supabase Auth before signing in.' });
+    }
+    if (error.status === 429) {
+      return json(res, 429, { message: 'Supabase Auth is temporarily rate-limiting sign-in. Wait a few minutes and retry.' });
+    }
+    return json(res, 503, {
+      message: 'Supabase Auth could not verify this sign-in request. Check that the Vercel Supabase URL and anon key belong to the same project, then inspect the Vercel Function logs.',
+      code: 'supabase_auth_unavailable',
+    });
+  }
+  if (invalidCredentials) {
     const { data: failure, error: recordError } = await admin.rpc('record_admin_login_failure', {
       p_email_hash: emailHash,
       p_ip_hash: ipHash,
@@ -136,6 +155,10 @@ export default async function handler(req, res) {
       attemptsRemaining: Math.max(0, 3 - (Number(failure?.attempts) || 0)),
       windowMinutes: authWindowMinutes,
     });
+  }
+  if (!data.session?.access_token || !data.session.refresh_token) {
+    console.error('[admin-login] Supabase Auth returned no session without an error.');
+    return json(res, 503, { message: 'Supabase Auth returned no session. Check the Vercel Function logs and project configuration.' });
   }
 
   await admin.rpc('clear_admin_login_failures', { p_email_hash: emailHash });

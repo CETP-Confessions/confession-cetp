@@ -465,7 +465,13 @@ async function handleForgotPassword(event) {
   const { error } = await supabase.auth.resetPasswordForEmail(email, {
     redirectTo: `${window.location.origin}/admin/login?mode=reset`,
   });
-  setNotice(error ? error.message : 'If an account exists for that email, a password reset link is on its way.', error ? 'error' : 'success');
+  if (error) {
+    setNotice(error.status >= 500
+      ? 'Supabase could not send the recovery email. Configure a working SMTP provider in Supabase Auth, then try again.'
+      : error.message, 'error');
+    return;
+  }
+  setNotice('If an account exists for that email, a password reset link is on its way.', 'success');
 }
 
 async function handlePasswordUpdate(event) {
