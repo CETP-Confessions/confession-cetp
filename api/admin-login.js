@@ -45,8 +45,17 @@ export default async function handler(req, res) {
   const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
   const anonKey = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !anonKey || !serviceRoleKey) {
-    return json(res, 503, { message: 'Admin sign-in is temporarily unavailable.' });
+  const missingConfiguration = [
+    !supabaseUrl && 'SUPABASE_URL',
+    !anonKey && 'SUPABASE_ANON_KEY',
+    !serviceRoleKey && 'SUPABASE_SERVICE_ROLE_KEY',
+  ].filter(Boolean);
+  if (missingConfiguration.length) {
+    console.error('[admin-login] Missing Vercel environment variables:', missingConfiguration.join(', '));
+    return json(res, 503, {
+      message: `Admin login is misconfigured on Vercel. Add ${missingConfiguration.join(', ')} to the project environment, then redeploy.`,
+      code: 'missing_server_environment',
+    });
   }
 
   let body;
@@ -79,7 +88,13 @@ export default async function handler(req, res) {
   const { data: lockout, error: lockoutError } = await admin.rpc('check_admin_login_lockout', {
     p_email_hash: emailHash,
   });
-  if (lockoutError) return json(res, 503, { message: 'Admin sign-in is temporarily unavailable.' });
+  if (lockoutError) {
+    console.error('[admin-login] Lockout check RPC failed:', { code: lockoutError.code, message: lockoutError.message });
+    return json(res, 503, {
+      message: 'Admin login protection is unavailable. Apply the Supabase migrations with `supabase db push`, then retry.',
+      code: 'lockout_migration_unavailable',
+    });
+  }
   if (action === 'check-lockout') {
     return json(res, 200, {
       locked: Boolean(lockout?.locked),
@@ -103,7 +118,13 @@ export default async function handler(req, res) {
       p_ip_hash: ipHash,
       p_alert_enabled: alertConfigured,
     });
-    if (recordError) return json(res, 503, { message: 'Admin sign-in is temporarily unavailable.' });
+    if (recordError) {
+      console.error('[admin-login] Failed to record sign-in attempt:', { code: recordError.code, message: recordError.message });
+      return json(res, 503, {
+        message: 'Admin login protection is unavailable. Check the Supabase migration status and Vercel function logs.',
+        code: 'lockout_migration_unavailable',
+      });
+    }
 
     if (failure?.shouldNotify) await sendLoginAlert();
     const retryAfterSeconds = Number(failure?.retryAfterSeconds) || 0;

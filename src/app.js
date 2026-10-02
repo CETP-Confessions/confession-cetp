@@ -1017,9 +1017,15 @@ async function handleLogin(data) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password }),
   });
-  const loginData = await response.json().catch(() => ({}));
+  const responseIsJson = response.headers.get('content-type')?.includes('application/json');
+  const loginData = responseIsJson ? await response.json().catch(() => ({})) : {};
+  if (!responseIsJson) {
+    throw new Error(response.status === 404 || response.ok
+      ? 'Vercel did not run /api/admin-login. Confirm api/admin-login.js is deployed from the project root and check Vercel routing.'
+      : `The Vercel sign-in endpoint returned HTTP ${response.status}. Check its Function logs.`);
+  }
   if (!response.ok) {
-    const authError = new Error(loginData.message || 'Admin sign-in is temporarily unavailable.');
+    const authError = new Error(loginData.message || `The Vercel sign-in endpoint returned HTTP ${response.status}.`);
     authError.retryAfterSeconds = Number(loginData.retryAfterSeconds) || 0;
     authError.attemptsRemaining = Number.isFinite(loginData.attemptsRemaining)
       ? Number(loginData.attemptsRemaining)
