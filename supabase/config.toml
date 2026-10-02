@@ -1,5 +1,5 @@
 [functions.cleanup-expired-media]
 verify_jwt = false
 
-[functions.admin-login]
+[functions.send-push]
 verify_jwt = false

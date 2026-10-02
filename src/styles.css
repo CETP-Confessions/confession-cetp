@@ -294,6 +294,11 @@ button, input, textarea { font: inherit; }
 .auth-lockout[hidden] { display: none; }
 .auth-lockout span { font-size: .86rem; font-weight: 600; }
 .auth-lockout strong { font-variant-numeric: tabular-nums; font-size: 1.2rem; font-weight: 700; }
+.auth-secondary-link { justify-self: start; color: var(--primary-strong); font-size: .9rem; font-weight: 700; }
+.auth-secondary-link:hover { text-decoration: underline; }
+.auth-helper { margin: 0 0 18px; color: var(--muted); font-size: .92rem; line-height: 1.55; }
+.auth-helper code { overflow-wrap: anywhere; color: var(--text); font-size: .84rem; }
+.auth-mfa-qr { display: block; width: min(100%, 220px); aspect-ratio: 1; margin: 0 auto 18px; border: 1px solid var(--line); border-radius: 8px; }
 .auth-page .react-gradient-btn-mount { width: 100%; }
 .auth-page .react-gradient-btn-mount button { width: 100%; min-height: 48px; border-radius: 10px; }
 .message-page-back { width: min(560px, 100%); margin: 0 auto 12px; }

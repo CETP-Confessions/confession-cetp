@@ -33,19 +33,46 @@ Former `/admin/register` and `/register` URLs redirect to admin login; they do n
 - Public RPCs return only the censored `public_message` field, and only approved, unexpired records. Admin approval requires a public version.
 - Existing approved messages without a reliable approval time remain hidden until manually reviewed and re-approved; the migration does not guess their expiration date.
 - Media references expire after seven days. The daily Edge Function deletes storage objects before clearing references and retries failed deletions.
-- Admin passwords are sent directly to Supabase Auth through the `admin-login` Edge Function and are never stored by this app. Failed attempts are tracked using keyed hashes; three failures trigger a five-minute server-side lockout.
-- An email alert is sent for the third failed attempt against the configured admin account when the Resend secrets below are configured.
+- Admin passwords are sent to Supabase Auth through the same-origin Vercel API route at `/api/admin-login` and are never stored by this app. Failed attempts are tracked using keyed hashes; three failures trigger a five-minute server-side lockout.
+- Admin dashboard data, storage, and push subscriptions require Supabase assurance level `aal2`. Admins enroll an authenticator app at sign-in, then confirm a six-digit code.
+- An email alert is sent for the third failed attempt against the configured admin account when the Vercel Resend environment variables are configured.
+
+## Mobile push notifications
+
+Push notifications require HTTPS. On iPhone or iPad, install the site from Safari using **Share > Add to Home Screen**, then open the installed app before enabling notifications. Android users can enable notifications in a supported browser.
+
+1. Generate one VAPID key pair with `npx --yes web-push generate-vapid-keys`. Keep the private key secret; do not commit it.
+2. Add the generated public key as `VITE_WEB_PUSH_PUBLIC_KEY` in the local Vite environment and in the production host's environment variables, then redeploy the frontend.
+3. Set the function secrets and deploy the function:
+
+```sh
+supabase secrets set VAPID_PUBLIC_KEY=<public-key> VAPID_PRIVATE_KEY=<private-key> VAPID_SUBJECT=mailto:admin@example.com PUSH_WEBHOOK_SECRET=<random-secret>
+supabase functions deploy send-push --use-api
+```
+
+4. Apply the migration with `supabase db push`. Then add the same random webhook secret to Vault:
+
+```sql
+select vault.create_secret('THE_SAME_RANDOM_SECRET', 'push_function_secret');
+```
+
+The project URL is read from the existing `supabase_project_url` Vault secret. The migration creates a `pg_net` trigger that posts only the message ID and admin ID to the function; it does not include message content.
+5. Use the exact same public key in the frontend and Edge Function. Generate a long random webhook secret, for example with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`.
+6. Sign in to the admin dashboard on each device and press **Enable mobile alerts** or **Set up mobile alerts**. Allow the browser permission prompt.
+
+The database webhook sends generic notification text and never includes the anonymous message content. The Edge Function removes expired device subscriptions automatically. If notification permission was previously denied, re-enable it in the browser or device settings first.
 
 ## Admin login protection
 
-Apply the login-protection migration and deploy the Edge Function:
+Apply all database migrations, including the admin login protection and MFA enforcement migrations:
 
 ```sh
 supabase db push
-supabase functions deploy admin-login
 ```
 
-Set these values as Supabase Edge Function secrets, not in `.env` or source control: `ADMIN_LOGIN_ALERT_EMAIL`, `RESEND_API_KEY`, and `RESEND_FROM_EMAIL`. Use a verified sender address for Resend. Supabase supplies `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` to the function runtime. Without the Resend secrets, server-side lockout still works but email alerts are disabled.
+Set these Vercel environment variables on the server runtime: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `ADMIN_LOGIN_ALERT_EMAIL`, `RESEND_API_KEY`, and `RESEND_FROM_EMAIL`. Use a verified sender address for Resend. Never use a `VITE_` prefix for the service-role key or Resend key. Without the Resend variables, server-side lockout still works but email alerts are disabled.
+
+In Supabase Auth URL Configuration, allow the recovery redirect for your deployed site (for example `https://YOUR_DOMAIN/admin/login*`) and local development (`http://localhost:5173/admin/login*`). The password reset email returns to the app to set the new password.
 
 ## Scheduled cleanup setup
 

@@ -101,6 +101,7 @@ const mobileMenuAnimations = new WeakMap();
 let authLockTimer = 0;
 let authLockCheckSequence = 0;
 let dashboardLoadSequence = 0;
+let adminMfaState = null;
 let messageNotificationChannel = null;
 let messageNotificationAdminId = null;
 let messageNotificationStatus = 'offline';
@@ -183,9 +184,13 @@ async function refreshAdminLockout(form) {
   if (!supabase || !email || !emailInput?.checkValidity()) return;
 
   const requestSequence = ++authLockCheckSequence;
-  const { data, error } = await supabase.functions.invoke('admin-login', {
-    body: { action: 'check-lockout', email },
+  const response = await fetch('/api/admin-login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'check-lockout', email }),
   });
+  const data = await response.json().catch(() => ({}));
+  const error = response.ok ? null : new Error(data.message || 'Unable to check sign-in status.');
   if (error || !form.isConnected || requestSequence !== authLockCheckSequence) return;
   if (String(emailInput.value || '').trim() !== email) return;
 
@@ -309,23 +314,6 @@ function subscribeToMessageNotifications(adminId) {
     }, (payload) => {
       if (state.user?.id !== adminId || window.location.pathname !== '/admin/dashboard') return;
 
-      const message = payload.new;
-      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-        try {
-          const notification = new Notification('New message received', {
-            body: 'A new anonymous message is waiting in your inbox.',
-            tag: `new-message-${message.id}`,
-          });
-          notification.onclick = () => {
-            window.focus();
-            if (window.location.pathname !== '/admin/dashboard') window.location.href = '/admin/dashboard';
-            notification.close();
-          };
-        } catch (error) {
-          console.warn('Browser notification could not be displayed.', error);
-        }
-      }
-
       renderDashboard('A new message just arrived.');
     })
     .subscribe((status) => {
@@ -345,13 +333,56 @@ function notificationPermission() {
 function notificationButtonMarkup() {
   const permission = notificationPermission();
   const labels = {
-    granted: 'Notifications enabled',
+    granted: 'Test notifications',
     denied: 'Notifications blocked',
     default: 'Enable notifications',
     unavailable: 'Notifications unavailable',
   };
-  const disabled = permission !== 'default';
+  const disabled = permission === 'denied' || permission === 'unavailable';
   return `<button class="secondary-button" data-action="enable-notifications" ${disabled ? 'disabled' : ''}>${labels[permission]}</button>`;
+}
+
+function urlBase64ToUint8Array(value) {
+  const padding = '='.repeat((4 - value.length % 4) % 4);
+  const base64 = `${value}${padding}`.replace(/-/g, '+').replace(/_/g, '/');
+  return Uint8Array.from(window.atob(base64), (character) => character.charCodeAt(0));
+}
+
+async function enablePushNotifications() {
+  if (!state.user || !supabase) throw new Error('Sign in to enable notifications.');
+  if (!window.isSecureContext || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+    throw new Error('Push notifications are unavailable in this browser. On iPhone or iPad, install this site to your Home Screen and open it there.');
+  }
+
+  const publicKey = import.meta.env.VITE_WEB_PUSH_PUBLIC_KEY;
+  if (!publicKey) throw new Error('Push notifications are not configured yet. Add the VITE_WEB_PUSH_PUBLIC_KEY setting and redeploy the app.');
+
+  let permission = Notification.permission;
+  if (permission === 'default') permission = await Notification.requestPermission();
+  if (permission !== 'granted') throw new Error('Notification permission was not granted. Check this site’s notification settings.');
+
+  const registration = await navigator.serviceWorker.register('/service-worker.js');
+  let subscription = await registration.pushManager.getSubscription();
+  if (!subscription) {
+    subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(publicKey),
+    });
+  }
+
+  const { error } = await supabase.from('push_subscriptions').upsert({
+    admin_id: state.user.id,
+    endpoint: subscription.endpoint,
+    subscription: subscription.toJSON(),
+  }, { onConflict: 'admin_id,endpoint' });
+  if (error) throw error;
+
+  const readyRegistration = await navigator.serviceWorker.ready;
+  await readyRegistration.showNotification('Notifications are working', {
+    body: 'This device can display notifications. New messages will trigger alerts.',
+    icon: '/logo.jpg',
+    tag: 'notification-setup-test',
+  });
 }
 
 function realtimeStatusMarkup() {
@@ -374,27 +405,116 @@ async function renderHome() {
   await renderReactPage('HomePage', { inboxUrl: `/message/${INBOX_USERNAME}` });
 }
 
-function renderAuth() {
+function renderAuth(mode = 'login') {
+  const content = mode === 'forgot'
+    ? `<p class="eyebrow">Account recovery</p><h1>Reset your password</h1><form id="forgot-password-form" class="stack-form"><label>Email<input name="email" type="email" autocomplete="email" required /></label><div class="notice" data-notice aria-live="polite"></div><div class="react-gradient-btn-mount" data-label="Send reset link" data-type="submit" style="width:100%"></div><a class="auth-secondary-link" href="/admin/login">Back to sign in</a></form>`
+    : mode === 'reset'
+      ? `<p class="eyebrow">Account recovery</p><h1>Choose a new password</h1><form id="reset-password-form" class="stack-form"><label>New password<input name="password" type="password" minlength="8" autocomplete="new-password" required /></label><label>Confirm password<input name="confirmPassword" type="password" minlength="8" autocomplete="new-password" required /></label><div class="notice" data-notice aria-live="polite"></div><div class="react-gradient-btn-mount" data-label="Update password" data-type="submit" style="width:100%"></div></form>`
+      : mode === 'mfa'
+        ? `<p class="eyebrow">Two-step verification</p><h1>${adminMfaState?.type === 'enroll' ? 'Set up an authenticator' : 'Verify it is you'}</h1>${adminMfaState?.type === 'enroll' ? `<p class="auth-helper">Scan this QR code with an authenticator app, then enter its current six-digit code.</p><img class="auth-mfa-qr" src="${escapeHtml(adminMfaState.qrCode)}" alt="Authenticator setup QR code" /><p class="auth-helper">Can’t scan it? Enter this setup key: <code>${escapeHtml(adminMfaState.secret)}</code></p>` : '<p class="auth-helper">Enter the six-digit code from your authenticator app.</p>'}<form id="auth-mfa-form" class="stack-form"><label>Authenticator code<input name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required /></label><div class="notice" data-notice aria-live="polite"></div><div class="react-gradient-btn-mount" data-label="Verify and continue" data-type="submit" style="width:100%"></div></form>`
+        : `<p class="eyebrow">Admin login</p><h1>Welcome back</h1><form id="auth-form" class="stack-form"><label>Email<input name="email" type="email" autocomplete="email" required /></label><label>Password<input name="password" type="password" minlength="8" autocomplete="current-password" required /></label><div class="auth-lockout" data-auth-lockout role="status" aria-live="polite" hidden><span>Sign-in temporarily paused</span><strong data-auth-lockout-countdown>05:00</strong></div><div class="notice" data-notice aria-live="polite"></div><div class="react-gradient-btn-mount" data-label="Sign in" data-type="submit" style="width:100%"></div><a class="auth-secondary-link" href="/admin/login?mode=forgot">Forgot password?</a></form>`;
   root.innerHTML = `
     <main class="auth-page">
       ${publicNavbar('/admin/login')}
-      <div class="auth-panel">
-        <p class="eyebrow">Admin login</p>
-        <h1>Welcome back</h1>
-        <form id="auth-form" class="stack-form">
-          <label>Email<input name="email" type="email" autocomplete="email" required /></label>
-          <label>Password<input name="password" type="password" minlength="8" autocomplete="current-password" required /></label>
-          <div class="auth-lockout" data-auth-lockout role="status" aria-live="polite" hidden><span>Sign-in temporarily paused</span><strong data-auth-lockout-countdown>05:00</strong></div>
-          <div class="notice" data-notice aria-live="polite"></div>
-          <div class="react-gradient-btn-mount" data-label="Sign in" data-type="submit" style="width:100%"></div>
-        </form>
-      </div>
+      <div class="auth-panel">${content}</div>
     </main>
   `;
   const loginForm = root.querySelector('#auth-form');
   loginForm?.elements.namedItem('email')?.addEventListener('blur', () => {
     refreshAdminLockout(loginForm);
   });
+}
+
+async function requireAdminMfa() {
+  const { data: assurance, error: assuranceError } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+  if (assuranceError) throw assuranceError;
+  if (assurance.currentLevel === 'aal2') return true;
+
+  const { data: factors, error: factorsError } = await supabase.auth.mfa.listFactors();
+  if (factorsError) throw factorsError;
+  const verifiedFactor = factors.totp?.find((factor) => factor.status === 'verified');
+  if (verifiedFactor) {
+    adminMfaState = { type: 'challenge', factorId: verifiedFactor.id };
+  } else {
+    const pendingFactor = factors.totp?.find((factor) => factor.status !== 'verified');
+    if (pendingFactor) {
+      const { error: removeError } = await supabase.auth.mfa.unenroll({ factorId: pendingFactor.id });
+      if (removeError) throw removeError;
+    }
+    const { data: enrollment, error: enrollmentError } = await supabase.auth.mfa.enroll({
+      factorType: 'totp',
+      friendlyName: `Admin authenticator ${Date.now()}`,
+    });
+    if (enrollmentError) throw enrollmentError;
+    adminMfaState = {
+      type: 'enroll',
+      factorId: enrollment.id,
+      secret: enrollment.totp.secret,
+      qrCode: await QRCode.toDataURL(enrollment.totp.uri),
+    };
+  }
+  renderAuth('mfa');
+  return false;
+}
+
+async function handleForgotPassword(event) {
+  event.preventDefault();
+  const form = event.target instanceof HTMLFormElement ? event.target : event.target.closest('form');
+  const email = String(new FormData(form).get('email') || '').trim();
+  setNotice('Sending reset link…');
+  const { error } = await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo: `${window.location.origin}/admin/login?mode=reset`,
+  });
+  setNotice(error ? error.message : 'If an account exists for that email, a password reset link is on its way.', error ? 'error' : 'success');
+}
+
+async function handlePasswordUpdate(event) {
+  event.preventDefault();
+  const form = event.target instanceof HTMLFormElement ? event.target : event.target.closest('form');
+  const values = Object.fromEntries(new FormData(form));
+  if (values.password !== values.confirmPassword) {
+    setNotice('The passwords do not match.', 'error');
+    return;
+  }
+
+  setNotice('Updating password…');
+  const { error } = await supabase.auth.updateUser({ password: values.password });
+  if (error) {
+    setNotice(error.message, 'error');
+    return;
+  }
+  await supabase.auth.signOut();
+  state.user = null;
+  adminMfaState = null;
+  window.history.replaceState(null, '', '/admin/login');
+  renderAuth('login');
+  setNotice('Your password was updated. Sign in with your new password.');
+}
+
+async function handleMfaSubmit(event) {
+  event.preventDefault();
+  if (!adminMfaState) {
+    setNotice('The verification step expired. Sign in again.', 'error');
+    return;
+  }
+  const form = event.target instanceof HTMLFormElement ? event.target : event.target.closest('form');
+  const code = String(new FormData(form).get('code') || '').trim();
+  const { error } = await supabase.auth.mfa.challengeAndVerify({
+    factorId: adminMfaState.factorId,
+    code,
+  });
+  if (error) {
+    setNotice(error.message || 'That code could not be verified. Try the current code from your authenticator.', 'error');
+    return;
+  }
+  const { data: assurance, error: assuranceError } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+  if (assuranceError || assurance.currentLevel !== 'aal2') {
+    setNotice(assuranceError?.message || 'Two-step verification was not completed.', 'error');
+    return;
+  }
+  adminMfaState = null;
+  window.history.replaceState(null, '', '/admin/dashboard');
+  await route();
 }
 
 async function loadProfileForUser() {
@@ -420,6 +540,13 @@ async function loadProfileForUser() {
 async function renderDashboard(noticeMessage = '') {
   if (!supabase || !state.user) {
     renderAuth('login');
+    return;
+  }
+  try {
+    if (!await requireAdminMfa()) return;
+  } catch (error) {
+    renderAuth('login');
+    setNotice(error.message || 'Two-step verification is unavailable. Please try again.', 'error');
     return;
   }
 
@@ -885,18 +1012,17 @@ async function handleLogin(data) {
     throw new Error('Email and password are required.');
   }
 
-  const { data: loginData, error } = await supabase.functions.invoke('admin-login', {
-    body: { email, password },
+  const response = await fetch('/api/admin-login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
   });
-  if (error) {
-    let responseBody = {};
-    if (error.context instanceof Response) {
-      responseBody = await error.context.clone().json().catch(() => ({}));
-    }
-    const authError = new Error(responseBody.message || 'Admin sign-in is temporarily unavailable.');
-    authError.retryAfterSeconds = Number(responseBody.retryAfterSeconds) || 0;
-    authError.attemptsRemaining = Number.isFinite(responseBody.attemptsRemaining)
-      ? Number(responseBody.attemptsRemaining)
+  const loginData = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const authError = new Error(loginData.message || 'Admin sign-in is temporarily unavailable.');
+    authError.retryAfterSeconds = Number(loginData.retryAfterSeconds) || 0;
+    authError.attemptsRemaining = Number.isFinite(loginData.attemptsRemaining)
+      ? Number(loginData.attemptsRemaining)
       : null;
     throw authError;
   }
@@ -1292,6 +1418,15 @@ async function route() {
   }
 
   if (pathname === '/admin/login') {
+    const authMode = new URLSearchParams(window.location.search).get('mode');
+    if (authMode === 'forgot') {
+      renderAuth('forgot');
+      return;
+    }
+    if (authMode === 'reset') {
+      renderAuth('reset');
+      return;
+    }
     if (state.user) {
       window.history.replaceState(null, '', '/admin/dashboard');
       await renderDashboard();
@@ -1338,6 +1473,18 @@ async function route() {
 root.addEventListener('submit', async (event) => {
   if (event.target.matches('#auth-form')) {
     await handleAuthSubmit(event);
+    return;
+  }
+  if (event.target.matches('#forgot-password-form')) {
+    await handleForgotPassword(event);
+    return;
+  }
+  if (event.target.matches('#reset-password-form')) {
+    await handlePasswordUpdate(event);
+    return;
+  }
+  if (event.target.matches('#auth-mfa-form')) {
+    await handleMfaSubmit(event);
     return;
   }
 
@@ -1554,12 +1701,12 @@ root.addEventListener('click', async (event) => {
       await renderDashboard();
       break;
     case 'enable-notifications': {
-      if (notificationPermission() !== 'default') break;
-      const permission = await Notification.requestPermission();
-      const notice = permission === 'granted'
-        ? 'Browser notifications are enabled.'
-        : 'Browser notifications were not enabled.';
-      await renderDashboard(notice);
+      try {
+        await enablePushNotifications();
+        await renderDashboard('Notifications are set up. A test alert was sent to this device.');
+      } catch (error) {
+        await renderDashboard(error.message || 'Push notifications could not be enabled.');
+      }
       break;
     }
     case 'delete-message':

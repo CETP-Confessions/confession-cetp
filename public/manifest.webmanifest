@@ -1,0 +1,17 @@
+{
+  "name": "CETP Confessions",
+  "short_name": "Confessions",
+  "start_url": "/admin/login",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#7b6faf",
+  "icons": [
+    {
+      "src": "/logo.jpg",
+      "sizes": "1124x1113",
+      "type": "image/jpeg",
+      "purpose": "any"
+    }
+  ]
+}
