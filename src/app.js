@@ -410,8 +410,10 @@ function renderAuth(mode = 'login') {
     ? `<p class="eyebrow">Account recovery</p><h1>Reset your password</h1><form id="forgot-password-form" class="stack-form"><label>Email<input name="email" type="email" autocomplete="email" required /></label><div class="notice" data-notice aria-live="polite"></div><div class="react-gradient-btn-mount" data-label="Send reset link" data-type="submit" style="width:100%"></div><a class="auth-secondary-link" href="/admin/login">Back to sign in</a></form>`
     : mode === 'reset'
       ? `<p class="eyebrow">Account recovery</p><h1>Choose a new password</h1><form id="reset-password-form" class="stack-form"><label>New password<input name="password" type="password" minlength="8" autocomplete="new-password" required /></label><label>Confirm password<input name="confirmPassword" type="password" minlength="8" autocomplete="new-password" required /></label><div class="notice" data-notice aria-live="polite"></div><div class="react-gradient-btn-mount" data-label="Update password" data-type="submit" style="width:100%"></div></form>`
+      : mode === 'reset-link-invalid'
+        ? `<p class="eyebrow">Account recovery</p><h1>Reset link expired</h1><p class="auth-helper">This recovery link is invalid, expired, or was already used. Request a new link to continue.</p><a class="primary-button full-width" href="/admin/login?mode=forgot">Request a new link</a><a class="auth-secondary-link" href="/admin/login">Back to sign in</a>`
       : mode === 'mfa'
-        ? `<p class="eyebrow">Two-step verification</p><h1>${adminMfaState?.type === 'enroll' ? 'Set up an authenticator' : 'Verify it is you'}</h1>${adminMfaState?.type === 'enroll' ? `<p class="auth-helper">Scan this QR code with an authenticator app, then enter its current six-digit code.</p><img class="auth-mfa-qr" src="${escapeHtml(adminMfaState.qrCode)}" alt="Authenticator setup QR code" /><p class="auth-helper">Can’t scan it? Enter this setup key: <code>${escapeHtml(adminMfaState.secret)}</code></p>` : '<p class="auth-helper">Enter the six-digit code from your authenticator app.</p>'}<form id="auth-mfa-form" class="stack-form"><label>Authenticator code<input name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required /></label><div class="notice" data-notice aria-live="polite"></div><div class="react-gradient-btn-mount" data-label="Verify and continue" data-type="submit" style="width:100%"></div></form>`
+        ? `<p class="eyebrow">Two-step verification</p><h1>${adminMfaState?.type === 'enroll' ? 'Set up an authenticator' : 'Verify it is you'}</h1>${adminMfaState?.type === 'enroll' ? `<p class="auth-helper">Scan this QR code with an authenticator app, then enter its current six-digit code.</p><img class="auth-mfa-qr" src="${escapeHtml(adminMfaState.qrCode)}" alt="Authenticator setup QR code" /><p class="auth-helper">Can’t scan it? Enter this setup key: <code>${escapeHtml(adminMfaState.secret)}</code></p>` : `<p class="auth-helper">${adminMfaState?.returnTo === 'password-reset' ? 'Verify with your authenticator before choosing a new password.' : 'Enter the six-digit code from your authenticator app.'}</p>`}<form id="auth-mfa-form" class="stack-form"><label>Authenticator code<input name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required /></label><div class="notice" data-notice aria-live="polite"></div><div class="react-gradient-btn-mount" data-label="Verify and continue" data-type="submit" style="width:100%"></div></form>`
         : `<p class="eyebrow">Admin login</p><h1>Welcome back</h1><form id="auth-form" class="stack-form"><label>Email<input name="email" type="email" autocomplete="email" required /></label><label>Password<input name="password" type="password" minlength="8" autocomplete="current-password" required /></label><div class="auth-lockout" data-auth-lockout role="status" aria-live="polite" hidden><span>Sign-in temporarily paused</span><strong data-auth-lockout-countdown>05:00</strong></div><div class="notice" data-notice aria-live="polite"></div><div class="react-gradient-btn-mount" data-label="Sign in" data-type="submit" style="width:100%"></div><a class="auth-secondary-link" href="/admin/login?mode=forgot">Forgot password?</a></form>`;
   root.innerHTML = `
     <main class="auth-page">
@@ -425,7 +427,7 @@ function renderAuth(mode = 'login') {
   });
 }
 
-async function requireAdminMfa() {
+async function requireAdminMfa(returnTo = 'dashboard') {
   const { data: assurance, error: assuranceError } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
   if (assuranceError) throw assuranceError;
   if (assurance.currentLevel === 'aal2') return true;
@@ -434,7 +436,7 @@ async function requireAdminMfa() {
   if (factorsError) throw factorsError;
   const verifiedFactor = factors.totp?.find((factor) => factor.status === 'verified');
   if (verifiedFactor) {
-    adminMfaState = { type: 'challenge', factorId: verifiedFactor.id };
+    adminMfaState = { type: 'challenge', factorId: verifiedFactor.id, returnTo };
   } else {
     const pendingFactor = factors.totp?.find((factor) => factor.status !== 'verified');
     if (pendingFactor) {
@@ -449,12 +451,33 @@ async function requireAdminMfa() {
     adminMfaState = {
       type: 'enroll',
       factorId: enrollment.id,
+      returnTo,
       secret: enrollment.totp.secret,
       qrCode: await QRCode.toDataURL(enrollment.totp.uri),
     };
   }
   renderAuth('mfa');
   return false;
+}
+
+async function renderPasswordReset() {
+  const { data, error } = await supabase.auth.getSession();
+  if (error || !data.session) {
+    renderAuth('reset-link-invalid');
+    return;
+  }
+  try {
+    const assurance = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+    if (assurance.error) throw assurance.error;
+    if (assurance.data.currentLevel === 'aal2') {
+      renderAuth('reset');
+      return;
+    }
+    await requireAdminMfa('password-reset');
+  } catch (mfaError) {
+    renderAuth('reset-link-invalid');
+    setNotice(mfaError.message || 'The recovery session could not be verified. Request a new reset link.', 'error');
+  }
 }
 
 async function handleForgotPassword(event) {
@@ -518,7 +541,12 @@ async function handleMfaSubmit(event) {
     setNotice(assuranceError?.message || 'Two-step verification was not completed.', 'error');
     return;
   }
+  const returnTo = adminMfaState.returnTo;
   adminMfaState = null;
+  if (returnTo === 'password-reset') {
+    renderAuth('reset');
+    return;
+  }
   window.history.replaceState(null, '', '/admin/dashboard');
   await route();
 }
@@ -1436,7 +1464,7 @@ async function route() {
       return;
     }
     if (authMode === 'reset') {
-      renderAuth('reset');
+      await renderPasswordReset();
       return;
     }
     if (state.user) {
